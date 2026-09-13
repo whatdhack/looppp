@@ -22,6 +22,7 @@ from typing import Protocol
 
 from looppp import contract as c
 from looppp.contract import GradeResult
+from looppp.envcheck import gpu_matches, gpu_probe
 from looppp.parsing import parse_benchmark, parse_check
 from looppp.problems import count_shapes, deck_head
 
@@ -76,22 +77,12 @@ def run_process(cmd: list[str], cwd: Path, env: dict[str, str], timeout: float) 
         return ProcResult(rc, out.read(), timed_out, time.monotonic() - start)
 
 
-def gpu_name() -> str:
-    try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=30)
-        return r.stdout.strip().splitlines()[0] if r.returncode == 0 and r.stdout.strip() else ""
-    except (OSError, subprocess.TimeoutExpired, IndexError):
-        return ""
+class GpuCheckError(RuntimeError):
+    """The GPU could not be identified or is not the expected one. ``probe`` holds the evidence."""
 
-
-def torch_version(python: str = sys.executable) -> str:
-    try:
-        r = subprocess.run([python, "-c", "import torch; print(torch.__version__, torch.version.cuda)"],
-                           capture_output=True, text=True, timeout=120)
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    def __init__(self, message: str, probe: dict):
+        super().__init__(message)
+        self.probe = probe
 
 
 class Grader(Protocol):
@@ -120,13 +111,18 @@ class KernelBenchGrader:
             raise RuntimeError(f"deck at {head}, expected {expected_commit}; run fetch_deck first")
         if not self.entrypoint.is_file():
             raise RuntimeError(f"missing {self.entrypoint}")
-        self.gpu = gpu_name()
-        if expected_gpu and expected_gpu.upper() not in self.gpu.upper():
-            raise RuntimeError(f"GPU {self.gpu!r} does not match expected {expected_gpu!r}")
-        self.torch = torch_version(python)
+        self.probe = gpu_probe(python)
+        self.gpu = self.probe["name"]
+        if expected_gpu and not self.gpu:
+            raise GpuCheckError(f"no GPU found (expected {expected_gpu!r})", self.probe)
+        if not gpu_matches(self.gpu, expected_gpu):
+            raise GpuCheckError(f"GPU {self.gpu!r} does not match expected {expected_gpu!r}", self.probe)
+        t = self.probe.get("torch")
+        self.torch = f"{t['torch']} (cuda {t['cuda']})" if isinstance(t, dict) else ""
 
     def describe(self) -> dict:
-        return {"gpu_name": self.gpu, "torch_version": self.torch, "deck_commit": self.expected_commit}
+        return {"gpu_name": self.gpu, "gpu_source": self.probe.get("source", ""), "torch_version": self.torch,
+                "deck_commit": self.expected_commit}
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", "-C", str(self.repo), *args], capture_output=True, text=True)
