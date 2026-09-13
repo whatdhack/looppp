@@ -41,18 +41,43 @@ Both modes use the same agent, grader, prompts and safety checks.
 **You need:** a molab account and a W&B API key. A W&B team entity is optional (usage attribution, logging).
 
 1. **Open** [`notebooks/loop.py` in molab](https://molab.marimo.io/github/whatdhack/looppp/blob/main/notebooks/loop.py)
-   and attach the **RTX PRO 6000** (notebook specs button in the header). Run all cells.
+   and attach the **RTX PRO 6000** (resources button in the header → GPUs → *Save and restart*). Run all cells.
+
+   <img src="docs/images/loop-attach-gpu.png" alt="molab resources menu with the RTX Pro 6000 (Blackwell) GPU selected" width="760">
+
 2. **Setup cell:** clones or pulls the looppp code and installs missing packages.
 3. **1. Environment and problems:** all required checks must be green; the pinned deck is fetched.
 4. **2. CUDA toolkit:** installs `nvcc` and headers automatically (about a minute on the first run). Needed
    for C++/CUDA extension kernels; Triton kernels work without it.
 5. **3. Settings:** paste the W&B API key, choose model and problem, press **Apply settings**. This checks
    the GPU and builds the grader; nothing runs yet. Then press **Test the model** to send one small request.
+
+   <details><summary>Settings form</summary>
+
+   <img src="docs/images/loop-settings.png" alt="Settings form: key, model, problem, candidates, generations, patience, budget, logging options" width="760">
+
+   </details>
+
+   A successful model test:
+
+   <img src="docs/images/loop-test-model.png" alt="Test the model: zai-org/GLM-5.2 answered in 2.3s, finish_reason stop, format OK" width="760">
+
 6. **4. Run:** **Start loop**. Keep the tab open. **Stop loop** takes effect after the current model call
    or grading.
 7. **5. Progress** (auto-refresh): status and "Now: …" activity, best score, minutes per generation and how
    many more generations fit in the budget, a best-so-far chart, the attempts table, the log, and the best
    kernel with a **Download** button.
+
+   <img src="docs/images/loop-progress.png" alt="Progress panel after a finished 3-generation run: best 0.0892, 6 of 6 graded, attempts table" width="760">
+
+   <sub>First real run (GLM-5.2, 2 candidates × 3 generations, 78 min). Screenshot taken before the pace
+   tiles, "Now:" line and mode/timing columns were added.</sub>
+
+   <details><summary>Best kernel with download</summary>
+
+   <img src="docs/images/loop-best-kernel.png" alt="Best kernel accordion: hypothesis, per-shape scores, download button and the Triton source" width="760">
+
+   </details>
 
 **Recommended first settings**
 
@@ -255,6 +280,20 @@ CLI: `looppp cuda-toolkit`.
   `extra_body`. Empty or truncated replies are retried with a doubled `max_tokens` up to the cap.
 
 The single notebook overrides the loop settings from its form.
+
+## Weave (optional)
+
+Weave is only used to **trace model calls**. When enabled, `weave.init("<entity>/<project>")` runs before the
+W&B Inference client is created, and Weave's OpenAI integration then records every chat completion (prompt,
+reply, token counts, latency) in that Weave project. Nothing else is traced: prechecks, grading and scores are
+not Weave ops.
+
+| Mode | How to enable |
+|---|---|
+| Single notebook | tick **trace model calls with Weave** in Settings (entity and project required; weave is installed on demand) |
+| Distributed | on by default for `looppp run` with the W&B backend and `WANDB_ENTITY` set; `--no-weave` turns it off |
+
+Candidate results live in the attempts table (notebook) or in W&B runs (distributed), not in Weave.
 
 ## W&B layout (distributed mode)
 

@@ -326,6 +326,14 @@ def _(ConsoleTracker, LoopSession, SessionOptions, TeeTracker, WandbInferenceLLM
 
     if _v["weave"]:
         try:
+            import importlib.util as _ilu
+            import subprocess as _sp
+            import sys as _sys
+
+            if _ilu.find_spec("weave") is None:  # not part of the setup cell's install list: install on demand
+                with mo.status.spinner(title="Installing weave..."):
+                    _sp.run([_sys.executable, "-m", "pip", "install", "-q", "weave"], check=True,
+                            capture_output=True, text=True, timeout=900)
             import weave
 
             os.environ["WANDB_API_KEY"] = _key  # weave reads it; grading subprocesses never see it (scrubbed env)
