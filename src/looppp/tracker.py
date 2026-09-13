@@ -47,6 +47,38 @@ class ConsoleTracker:
         pass
 
 
+class TeeTracker:
+    """Send everything to several trackers; a failing secondary never breaks the loop."""
+
+    def __init__(self, primary: Tracker, *others: Tracker):
+        self.primary, self.others = primary, others
+
+    @property
+    def alerts(self):
+        return getattr(self.primary, "alerts", [])
+
+    def _each(self, method: str, *args) -> None:
+        getattr(self.primary, method)(*args)
+        for t in self.others:
+            try:
+                getattr(t, method)(*args)
+            except Exception as e:  # noqa: BLE001
+                if hasattr(self.primary, "log") and method != "log":
+                    self.primary.log({"tracker_error": f"{type(t).__name__}.{method}: {type(e).__name__}: {e}"})
+
+    def log(self, data: dict) -> None:
+        self._each("log", data)
+
+    def summary(self, data: dict) -> None:
+        self._each("summary", data)
+
+    def alert(self, title: str, text: str) -> None:
+        self._each("alert", title, text)
+
+    def finish(self) -> None:
+        self._each("finish")
+
+
 class WandbTracker:
     def __init__(self, entity: str, project: str, loop_id: str, config: dict, api_key: str | None = None):
         import wandb

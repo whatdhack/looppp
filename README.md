@@ -4,7 +4,27 @@ An LLM agent loop that writes GPU kernels, graded on a real **RTX PRO 6000 Black
 [molab](https://molab.marimo.io), with [W&B](https://wandb.ai) carrying the work queue, results and
 traces.
 
-[![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/whatdhack/looppp/blob/main/worker/evaluator.py)
+## Two ways to run
+
+| | **Single notebook** (simplest) | **Distributed** |
+|---|---|---|
+| Notebook | [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/whatdhack/looppp/blob/main/notebooks/loop.py) `notebooks/loop.py` | [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/whatdhack/looppp/blob/main/worker/evaluator.py) `worker/evaluator.py` |
+| Agent loop runs | in the molab notebook (thread) | on WSL (`looppp run`) |
+| Grader runs | in the same notebook (thread) | in the molab notebook |
+| Queue | local files on the molab disk | W&B runs |
+| W&B needed for | the model API (W&B Inference); logging is optional | model API, queue, heartbeats (needs a Models seat) |
+| Survives the tab/kernel dying | no: the loop stops with the session (resume by loop id) | yes: the WSL loop pauses and resumes |
+
+### Single notebook
+
+1. Open `notebooks/loop.py` in molab and attach the RTX PRO 6000.
+2. Sections 1-2 check the environment, fetch the deck and install the CUDA toolkit automatically.
+3. Section 3: paste the W&B API key, pick model and problem, press **Apply settings** (checks the GPU and
+   builds the grader). **Test the model** sends one small request.
+4. Section 4: **Start loop**. Section 5 shows best-so-far, the attempts table, the log, and the best kernel
+   with a download button. **Stop loop** finishes the current step.
+
+The rest of this README describes the distributed mode and the shared components.
 
 ```
 WSL: looppp run (agent)                                   molab: worker/evaluator.py (RTX PRO 6000)
@@ -159,8 +179,10 @@ src/looppp/
   archive.py        best-per-problem archive
   envcheck.py       GPU box report, GPU probe (nvidia-smi / torch / procfs)
   cudatk.py         pip-provisioned CUDA toolkit (nvcc + headers) assembled into CUDA_HOME
+  session.py        single-process mode: agent thread + grader thread + local queue
   cli.py            `looppp` commands
-worker/evaluator.py marimo notebook for molab
+notebooks/loop.py   single notebook: loop + grader in molab
+worker/evaluator.py distributed mode: grader-only notebook for molab
 tests/              offline tests (fake deck git repo, fake worker, stub model)
 ```
 

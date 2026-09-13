@@ -31,6 +31,7 @@ from looppp.tracker import Tracker
 # Attempt statuses that never reach the queue.
 LOCAL_FAILED = "local_failed"
 OPEN_STATUSES = (c.STATUS_PENDING, c.STATUS_RUNNING, c.STATUS_SUBMITTING)
+MAX_CONSECUTIVE_LLM_FAILURES = 3
 
 
 @dataclass
@@ -89,6 +90,13 @@ class AgentLoop:
         self.attempts: list[Attempt] = []
         self.best_gen = -1
         self._down_since: float | None = None
+        self._stop_requested = False
+        self._llm_failures = 0
+
+    def request_stop(self) -> None:
+        """Ask the loop to stop at the next safe point (between model calls or polls). Candidates
+        already submitted stay in the queue; a later `run()` with the same loop id waits for them."""
+        self._stop_requested = True
 
     # --- persistence ----------------------------------------------------------
     def _state_file(self) -> Path:
@@ -159,14 +167,14 @@ class AgentLoop:
                 self._down_since = now
                 seen = "never reported" if age is None else f"last heartbeat {age / 60:.1f} min ago"
                 self.tracker.alert("looppp: worker offline",
-                                   f"{self.loop_id}: no fresh worker heartbeat ({seen}). Restart the molab "
-                                   "evaluator notebook; the loop is paused and will resume automatically.")
+                                   f"{self.loop_id}: no fresh worker heartbeat ({seen}). The loop is paused and resumes "
+                                   "automatically (distributed mode: restart the molab evaluator notebook).")
             if now - self._down_since > self.qs.max_worker_down_hours * 3600:
                 raise WorkerDown(f"worker offline for more than {self.qs.max_worker_down_hours} h")
         return alive
 
     def _await_worker(self) -> None:
-        while not self._worker_alive():
+        while not self._stop_requested and not self._worker_alive():
             self.sleep(self.qs.poll_seconds)
 
     # --- proposing ------------------------------------------------------------------
@@ -201,8 +209,13 @@ class AgentLoop:
         for repair in range(self.ls.precheck_repairs + 1):
             try:
                 reply = self.llm.complete(messages)
-            except EmptyCompletionError as e:
-                return self._local_failure(generation, index, "(model returned nothing usable)", c.STAGE_LLM, str(e), "")
+                self._llm_failures = 0
+            except Exception as e:  # noqa: BLE001 - one bad call costs one candidate, not the session
+                self._llm_failures += 1
+                reason = str(e) if isinstance(e, EmptyCompletionError) else f"{type(e).__name__}: {e}"
+                if self._llm_failures >= MAX_CONSECUTIVE_LLM_FAILURES:
+                    raise RuntimeError(f"{self._llm_failures} model calls failed in a row; last: {reason}") from e
+                return self._local_failure(generation, index, "(model call failed)", c.STAGE_LLM, reason, "")
             self.tracker.log({"llm/prompt_tokens": reply.prompt_tokens, "llm/completion_tokens": reply.completion_tokens,
                               "llm/attempts": reply.attempts, "generation": generation})
             try:
@@ -253,7 +266,7 @@ class AgentLoop:
     # --- waiting --------------------------------------------------------------------
     def _wait(self) -> None:
         last = self.clock()
-        while True:
+        while not self._stop_requested:
             open_ = [a for a in self.attempts if a.status in OPEN_STATUSES and a.candidate_id]
             if not open_:
                 return
@@ -285,6 +298,8 @@ class AgentLoop:
 
     # --- main -------------------------------------------------------------------------
     def _stop_reason(self, generation: int, started: float) -> str | None:
+        if self._stop_requested:
+            return "stopped"
         best = self._best_peak()
         if self.ls.target_peak_fraction is not None and best is not None and best >= self.ls.target_peak_fraction:
             return "target_reached"
@@ -342,11 +357,15 @@ class AgentLoop:
                     stop_reason = reason
                     break
                 self._await_worker()
+                if self._stop_requested:
+                    continue  # -> _stop_reason returns "stopped"
                 previous_best = self._best_peak()
                 parent = self._parent()
                 siblings: list[str] = []
                 n = self.ls.candidates_per_generation
                 for i in range(n):
+                    if self._stop_requested:
+                        break
                     attempt = self._propose_one(generation, i, n, parent, siblings)
                     siblings.append(attempt.hypothesis)
                     self.attempts.append(attempt)
