@@ -349,6 +349,8 @@ def _(holder, mo, refresh, sparkline_svg):
     _state_kind = {"running": "info", "finished": "success", "failed": "danger", "stopping": "warn"}.get(_snap["state"], "neutral")
     _headline = (f"**{_snap['state']}**" + (f" ({_snap['stop_reason']})" if _snap["stop_reason"] else "")
                  + f" · loop `{_snap['loop_id']}` · {_snap['elapsed_min']} min"
+                 + (f"  \n**Now:** {_snap['activity']} ({_snap['activity_seconds'] // 60}m {_snap['activity_seconds'] % 60:02d}s)"
+                    if _snap["activity"] else "")
                  + (f"  \n**Error:** {_snap['error']}" if _snap["error"] else ""))
     _parts = [
         mo.md("## 5. Progress"),

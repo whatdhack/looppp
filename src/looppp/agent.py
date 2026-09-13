@@ -92,6 +92,10 @@ class AgentLoop:
         self._down_since: float | None = None
         self._stop_requested = False
         self._llm_failures = 0
+        self.activity, self.activity_since = "starting", time.time()  # read by the notebook dashboard
+
+    def _set_activity(self, text: str) -> None:
+        self.activity, self.activity_since = text, time.time()
 
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (between model calls or polls). Candidates
@@ -174,6 +178,8 @@ class AgentLoop:
         return alive
 
     def _await_worker(self) -> None:
+        if not self._worker_alive():
+            self._set_activity("waiting for a live grader heartbeat")
         while not self._stop_requested and not self._worker_alive():
             self.sleep(self.qs.poll_seconds)
 
@@ -207,6 +213,9 @@ class AgentLoop:
         )
         hypothesis, code, errors = "(no reply)", "", ["no reply"]
         for repair in range(self.ls.precheck_repairs + 1):
+            what = "waiting for model" if repair == 0 else f"waiting for model (repair {repair})"
+            self._set_activity(f"gen {generation}.{index} (candidate {index + 1}/{n}): {what}")
+            self.log(f"gen {generation}.{index}: {what} ({self.llm.model}, prompt ~{sum(len(m['content']) for m in messages) // 4} tokens)")
             try:
                 reply = self.llm.complete(messages)
                 self._llm_failures = 0
@@ -265,6 +274,7 @@ class AgentLoop:
 
     # --- waiting --------------------------------------------------------------------
     def _wait(self) -> None:
+        self._set_activity("waiting for grading")
         last = self.clock()
         while not self._stop_requested:
             open_ = [a for a in self.attempts if a.status in OPEN_STATUSES and a.candidate_id]

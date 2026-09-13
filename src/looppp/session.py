@@ -174,4 +174,6 @@ class LoopSession:
             "alerts": list(getattr(self.tracker, "alerts", [])),
             "logs": list(self.logs),
             "stop_reason": self.outcome.stop_reason if self.outcome else "",
+            "activity": self.loop.activity if self.is_running else "",
+            "activity_seconds": round(time.time() - self.loop.activity_since) if self.is_running else 0,
         }

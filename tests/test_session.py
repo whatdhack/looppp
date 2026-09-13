@@ -84,3 +84,26 @@ def test_tee_tracker_isolates_secondary_failures(tmp_path):
     t.alert("title", "text")
     t.finish()
     assert t.alerts == [("title", "text")]
+
+
+def test_snapshot_reports_activity_while_model_is_thinking(cfg, toy_problem, tmp_path):
+    import threading
+    release = threading.Event()
+
+    class SlowLLM:
+        model = "slow"
+
+        def complete(self, messages):
+            release.wait(10)
+            from looppp.llm import LLMReply
+            return LLMReply(reply("slow idea", MODEL + "# FAKE_SCORE=0.2\n"), "stop")
+
+    s = _session(cfg, toy_problem, tmp_path, SlowLLM(), candidates_per_generation=1, max_generations=1)
+    s.start()
+    assert _wait(lambda: "waiting for model" in s.snapshot()["activity"])
+    snap = s.snapshot()
+    assert snap["attempts"] == 0 and "gen 0.0 (candidate 1/1)" in snap["activity"]
+    assert any("waiting for model (slow, prompt ~" in line for line in snap["logs"])
+    release.set()
+    assert _wait(lambda: not s.is_running)
+    assert s.snapshot()["activity"] == ""
