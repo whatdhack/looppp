@@ -185,100 +185,103 @@ def _(cfg, mo):
 @app.cell
 def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_problems, explain_wandb_error,
       gpu_probe, mo, new_worker_id, sys):
-    mo.stop(connect_form.value is None, mo.md("Fill in the form and press **Connect**."))
-    _v = connect_form.value
-    mo.stop(not _v["key"].strip() or not _v["entity"].strip(),
-            mo.callout(mo.md("Key and entity are required."), kind="warn"))
-
+    # This cell never calls mo.stop: when not connected it exports queue/grader = None and shows why, so the
+    # cells below can say "connect first" instead of marimo's generic "ancestor stopped".
     def _probe_table(probe):
-        _t = probe.get("torch")
-        _torch = (f"available={_t.get('available')} devices={_t.get('count')} name={_t.get('name')!r} "
-                  f"capability={_t.get('capability')} torch={_t.get('torch')} cuda={_t.get('cuda')}"
-                  if isinstance(_t, dict) else str(_t)[-400:])
+        t = probe.get("torch")
+        torch_txt = (f"available={t.get('available')} devices={t.get('count')} name={t.get('name')!r} "
+                     f"capability={t.get('capability')} torch={t.get('torch')} cuda={t.get('cuda')}"
+                     if isinstance(t, dict) else str(t)[-400:])
         return mo.ui.table([
             {"probe": "detected GPU", "result": f"{probe.get('name') or '(none)'}"
                                                 f"{' via ' + probe['source'] if probe.get('source') else ''}"},
             {"probe": "nvidia-smi", "result": str(probe.get("nvidia_smi"))[-400:]},
-            {"probe": "torch.cuda", "result": _torch},
+            {"probe": "torch.cuda", "result": torch_txt},
             {"probe": "/proc/driver/nvidia", "result": str(probe.get("procfs"))},
             {"probe": "/dev/nvidia*", "result": ", ".join(probe.get("device_nodes") or []) or "none"},
             {"probe": "CUDA_VISIBLE_DEVICES", "result": str(probe.get("cuda_visible_devices"))},
         ], selection=None, pagination=False)
 
-    _sections = [mo.md("### Connection report")]
-    worker_id = new_worker_id("molab")
+    def _connect(v):
+        """Returns (report sections, grader, queue, worker_id); grader/queue are None unless fully ready."""
+        wid = new_worker_id("molab")
+        out = [mo.md("### Connection report")]
 
-    # 1) W&B: read access (identity, project queries)
-    try:
-        queue = WandbQueue(_v["entity"].strip(), _v["project"].strip(), api_key=_v["key"].strip())
-        _viewer = queue.api.viewer
-        _user = getattr(_viewer, "username", None) or getattr(_viewer, "name", "?")
-        _hb = queue.worker_heartbeat_age()
-        _sections.append(mo.callout(mo.md(
-            f"**W&B read:** signed in as **{_user}**, project `{queue.entity}/{queue.project}`  \n"
-            f"previous worker heartbeat: {'none' if _hb is None else f'{_hb / 60:.1f} min ago'}"), kind="success"))
-    except Exception as _e:
-        _sections.append(mo.callout(mo.md(f"**W&B read:** failed. {explain_wandb_error(_e, _v['entity'])}"),
-                                    kind="danger"))
-        mo.stop(True, mo.vstack(_sections))
+        # 1) W&B read access (identity, project queries)
+        try:
+            q = WandbQueue(v["entity"].strip(), v["project"].strip(), api_key=v["key"].strip())
+            viewer = q.api.viewer
+            user = getattr(viewer, "username", None) or getattr(viewer, "name", "?")
+            hb = q.worker_heartbeat_age()
+            out.append(mo.callout(mo.md(
+                f"**W&B read:** signed in as **{user}**, project `{q.entity}/{q.project}`  \n"
+                f"previous worker heartbeat: {'none' if hb is None else f'{hb / 60:.1f} min ago'}"), kind="success"))
+        except Exception as e:
+            out.append(mo.callout(mo.md(f"**W&B read:** failed. {explain_wandb_error(e, v['entity'])}"), kind="danger"))
+            return out, None, None, None
 
-    # 2) W&B: write access (the worker creates a run and updates candidate runs)
-    try:
-        queue.check_write_access(worker_id)
-        _sections.append(mo.callout(mo.md(f"**W&B write:** worker run `{worker_id}` created"), kind="success"))
-    except Exception as _e:
-        _sections.append(mo.callout(mo.md(f"**W&B write:** failed. {explain_wandb_error(_e, queue.entity)}"),
-                                    kind="danger"))
-        mo.stop(True, mo.vstack(_sections))
+        # 2) W&B write access (the worker creates a run and updates candidate runs)
+        try:
+            q.check_write_access(wid)
+            out.append(mo.callout(mo.md(f"**W&B write:** worker run `{wid}` created"), kind="success"))
+        except Exception as e:
+            out.append(mo.callout(mo.md(f"**W&B write:** failed. {explain_wandb_error(e, q.entity)}"), kind="danger"))
+            return out, None, None, None
 
-    # 3) deck
-    if not deck_problems:
-        _sections.append(mo.callout(mo.md("**Deck:** not available, see section 2."), kind="danger"))
-        mo.stop(True, mo.vstack(_sections))
-    _sections.append(mo.callout(mo.md(f"**Deck:** `{cfg.deck.commit[:10]}`, {len(deck_problems)} problems"),
-                                kind="success"))
+        # 3) deck
+        if not deck_problems:
+            out.append(mo.callout(mo.md("**Deck:** not available, see section 2."), kind="danger"))
+            return out, None, None, None
+        out.append(mo.callout(mo.md(f"**Deck:** `{cfg.deck.commit[:10]}`, {len(deck_problems)} problems"),
+                              kind="success"))
 
-    # 4) GPU + grader
-    _expected = _v["expected_gpu"].strip() or None
-    try:
-        grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
-                                   cfg.deck.commit, _expected, cfg.worker.check_timeout_seconds,
-                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id,
-                                   toolkit_root=cfg.path(".looppp"))
-    except GpuCheckError as _e:
-        if not _v["allow_unverified_gpu"]:
-            _torch = _e.probe.get("torch")
-            _hint = ("PyTorch cannot see a GPU: attach the RTX PRO 6000 with the notebook specs button, then "
-                     "restart the kernel and run all cells." if not (isinstance(_torch, dict) and _torch.get("available"))
-                     else "A GPU is visible but its name does not match. If the detected name is right, change "
-                          "'expected GPU' in the form (or tick the override) and press Connect again.")
-            _sections += [mo.callout(mo.md(f"**GPU:** {_e}  \n{_hint}"), kind="danger"), _probe_table(_e.probe)]
-            mo.stop(True, mo.vstack(_sections))
-        grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
-                                   cfg.deck.commit, None, cfg.worker.check_timeout_seconds,
-                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id,
-                                   toolkit_root=cfg.path(".looppp"))
-        _sections.append(mo.callout(mo.md(f"**GPU:** check overridden ({_e}). Grades will record "
-                                          f"gpu_name={grader.gpu!r}."), kind="warn"))
-    except Exception as _e:
-        _sections.append(mo.callout(mo.md(f"**Grader:** not ready: `{type(_e).__name__}: {_e}`"), kind="danger"))
-        _sections.append(_probe_table(gpu_probe(sys.executable)))
-        mo.stop(True, mo.vstack(_sections))
+        # 4) GPU + grader
+        def make_grader(expected):
+            return KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
+                                     cfg.deck.commit, expected, cfg.worker.check_timeout_seconds,
+                                     cfg.worker.bench_timeout_seconds, worker_id=wid,
+                                     toolkit_root=cfg.path(".looppp"))
+        try:
+            g = make_grader(v["expected_gpu"].strip() or None)
+            out.append(mo.callout(mo.md(f"**GPU:** `{g.gpu}` (via {g.probe.get('source')})"), kind="success"))
+        except GpuCheckError as e:
+            if not v["allow_unverified_gpu"]:
+                t = e.probe.get("torch")
+                hint = ("PyTorch cannot see a GPU: attach the RTX PRO 6000 with the notebook specs button, then "
+                        "restart the kernel and run all cells." if not (isinstance(t, dict) and t.get("available"))
+                        else "A GPU is visible but its name does not match. If the detected name is right, change "
+                             "'expected GPU' in the form (or tick the override) and press Connect again.")
+                out += [mo.callout(mo.md(f"**GPU:** {e}  \n{hint}"), kind="danger"), _probe_table(e.probe)]
+                return out, None, None, None
+            g = make_grader(None)
+            out.append(mo.callout(mo.md(f"**GPU:** check overridden ({e}). Grades will record gpu_name={g.gpu!r}."),
+                                  kind="warn"))
+        except Exception as e:
+            out += [mo.callout(mo.md(f"**Grader:** not ready: `{type(e).__name__}: {e}`"), kind="danger"),
+                    _probe_table(gpu_probe(sys.executable))]
+            return out, None, None, None
+
+        home = g.cuda_home()
+        out += [
+            mo.callout(mo.md(f"**CUDA toolkit:** `{home}`" if home else
+                             "**CUDA toolkit:** none. C++/CUDA extension solutions will fail with `toolchain`; "
+                             "see section 2b."), kind="success" if home else "warn"),
+            _probe_table(g.probe),
+            mo.callout(mo.md(f"**Grader ready.** torch `{g.torch}` · worker id `{wid}`  \n"
+                             "Next: calibrate (section 4), then start the worker (section 5)."), kind="success"),
+        ]
+        return out, g, q, wid
+
+    _v = connect_form.value
+    if _v is None:
+        _report, grader, queue, worker_id = [mo.md("Fill in the form and press **Connect**. After a kernel "
+                                                    "restart the form is empty again: re-enter the key.")], None, None, None
+    elif not _v["key"].strip() or not _v["entity"].strip():
+        _report, grader, queue, worker_id = [mo.callout(mo.md("Key and entity are required."), kind="warn")], None, None, None
     else:
-        _sections.append(mo.callout(mo.md(f"**GPU:** `{grader.gpu}` (via {grader.probe.get('source')})"),
-                                    kind="success"))
-
-    _cuda_home = grader.cuda_home()
-    _sections.append(mo.callout(mo.md(
-        f"**CUDA toolkit:** `{_cuda_home}`" if _cuda_home else
-        "**CUDA toolkit:** none. CUDA C++ solutions will fail with `toolchain`; see section 2b."),
-        kind="success" if _cuda_home else "warn"))
-    _sections += [
-        _probe_table(grader.probe),
-        mo.callout(mo.md(f"**Grader ready.** torch `{grader.torch}` · worker id `{worker_id}`  \n"
-                         "Next: calibrate (section 4), then start the worker (section 5)."), kind="success"),
-    ]
-    mo.vstack(_sections)
+        with mo.status.spinner(title="Connecting: W&B, deck, GPU..."):
+            _report, grader, queue, worker_id = _connect(_v)
+    mo.vstack(_report)
     return grader, queue, worker_id
 
 
@@ -307,6 +310,7 @@ def _(cfg, deck_problems, mo):
 def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, needs_cuda_toolkit, queue,
       solution_from_run, worker_id):
     mo.stop(calib_form.value is None)
+    mo.stop(grader is None or queue is None, mo.callout(mo.md("**Not connected.** Complete section 3 (Connect) first; its report shows what is missing."), kind="warn"))
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
             mo.callout(mo.md("Stop the worker first: one GPU job at a time keeps timings clean."), kind="warn"))
     _name = calib_form.value["target"]
@@ -341,6 +345,7 @@ def _(mo):
 @app.cell
 def _(Worker, cfg, grader, holder, mo, queue, start_btn, time):
     mo.stop(not start_btn.value)
+    mo.stop(grader is None or queue is None, mo.callout(mo.md("**Not connected.** Complete section 3 (Connect) first; its report shows what is missing."), kind="warn"))
     if holder["worker"] is not None and holder["worker"].is_running:
         _out = mo.callout(mo.md("Worker already running."), kind="info")
     else:
@@ -374,6 +379,7 @@ def _(mo):
 @app.cell
 def _(explain_wandb_error, holder, mo, queue, refresh):
     refresh.value  # re-run on every tick
+    mo.stop(queue is None, mo.callout(mo.md("**Not connected.** Complete section 3 (Connect) first; its report shows what is missing."), kind="warn"))
     _w = holder["worker"]
     _st = _w.status if _w is not None else {"state": "not started", "graded": 0, "errors": 0, "current": "",
                                            "last": None, "error": ""}
