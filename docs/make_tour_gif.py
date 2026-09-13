@@ -19,6 +19,8 @@ SLIDES = [
     (["loop-settings.png", "loop-test-model.png"], "2  Settings, then test the model"),
     (["loop-progress.png"], "3  Start: live progress and attempts"),
     (["loop-best-kernel.png"], "4  Best kernel, ready to download"),
+    (["loop-wandb-gpu-metrics.png"], "5  W&B system metrics: GPU"),
+    (["loop-wandb-system-metrics.png"], "6  W&B system metrics: network, disk, memory"),
 ]
 
 def _font(name: str, size: int):

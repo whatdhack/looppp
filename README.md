@@ -40,7 +40,7 @@ Both modes use the same agent, grader, prompts and safety checks.
 
 **You need:** a molab account and a W&B API key. A W&B team entity is optional (usage attribution, logging).
 
-<img src="docs/images/loop-tour.gif" alt="Tour of the single notebook: attach the GPU, settings and model test, live progress, best kernel" width="760">
+<img src="docs/images/loop-tour.gif" alt="Tour: attach the GPU, settings and model test, live progress, best kernel, W&B system metrics" width="760">
 
 <sub>Regenerate after replacing screenshots: `uv run --with pillow python docs/make_tour_gif.py`</sub>
 
@@ -314,6 +314,22 @@ A **worker** run (`job_type=worker`) logs `heartbeat_ts`, its GPU / toolkit desc
 results. An **agent** run (`job_type=agent`, one per loop) logs per-generation best, failure counts, explore
 counts and token usage, and sends alerts. The single notebook creates only the agent run, and only when
 "log to W&B" is ticked.
+
+W&B also records **system metrics** for every run (the *System* section of the workspace). For the molab worker
+runs these show the GPU (power limit, memory, temperature, utilisation), network, disk and process memory.
+They are W&B Models metrics, not Weave.
+
+<details><summary>System metrics of molab worker runs</summary>
+
+<img src="docs/images/loop-wandb-gpu-metrics.png" alt="W&B system metrics: GPU power limit 600 W, memory allocated, temperature, utilisation for molab worker runs" width="760">
+
+<img src="docs/images/loop-wandb-system-metrics.png" alt="W&B system metrics: network traffic, disk, CPU threads and process memory for molab worker runs" width="760">
+
+These worker sessions were mostly idle (utilisation near 0%, apart from calibration at the start). The flat
+600 W enforced power limit is the full RTX PRO 6000 limit, so a power cap does not explain the 0.86
+calibration ratio.
+
+</details>
 
 ## Safety
 
