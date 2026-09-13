@@ -1,0 +1,52 @@
+# looppp run configuration. Paths are relative to the repo root.
+
+loop:
+  problem: 07_w4a16_gemm
+  model: zai-org/GLM-5.2
+  candidates_per_generation: 3
+  max_generations: 20
+  patience: 5                  # stop after this many generations without a new best
+  wall_budget_hours: 24
+  target_peak_fraction: null   # stop early once reached (e.g. 0.40)
+  history_window: 12           # graded attempts shown to the model each generation
+  precheck_repairs: 1          # local re-asks when a candidate fails precheck
+  state_dir: .looppp/loops
+
+queue:
+  backend: wandb               # wandb | local  (local = files on disk, for tests / same-machine runs)
+  entity: null                 # defaults to $WANDB_ENTITY; must be a team for ARIA
+  project: looppp              # overridable with $LOOPPP_PROJECT
+  local_root: .looppp/queue
+  poll_seconds: 30
+  wait_timeout_hours: 3        # per candidate, counted only while the worker heartbeat is fresh
+  max_worker_down_hours: 14    # molab restarts are manual; give up after this long without a worker
+  heartbeat_stale_seconds: 300
+  max_attempts: 2              # re-queues of a candidate orphaned by a dead worker
+
+deck:
+  repo: https://github.com/Infatoshi/kernelbench.com.git
+  commit: 62e4c346f5f351e06169676c605267d0291acaa5   # pinned; worker refuses candidates for another commit
+  subdir: benchmarks/hard
+  problems_dir: problems-rtxpro6000
+  local_path: .looppp/deck
+
+archive:
+  dir: archive
+  git_commit: false            # true: commit archive/<problem>/ whenever the graded best improves
+
+worker:
+  expected_gpu: "RTX PRO 6000" # substring of nvidia-smi name; null disables the check (fake runs)
+  check_timeout_seconds: 1800
+  bench_timeout_seconds: 1800
+  poll_seconds: 20
+  heartbeat_seconds: 30
+
+# Published KernelBench RTX PRO 6000 runs used to calibrate a molab GPU.
+# The worker rebuilds solution.py from the HuggingFace trace and grades it.
+calibration:
+  07_w4a16_gemm:
+    run_id: 20260716_112718_kinetic-claude_kinetic-0715_07_w4a16_gemm
+    published_peak_fraction: 0.3733
+  03_paged_attention:
+    run_id: 20260613_042305_claude_claude-opus-4-8_03_paged_attention
+    published_peak_fraction: 0.6706

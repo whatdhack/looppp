@@ -1,0 +1,6 @@
+# Public repo: block committed secrets. Install once with `uvx pre-commit install`.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks

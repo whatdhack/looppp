@@ -1,0 +1,20 @@
+# secrets
+.env
+.env.*
+!.env.example
+.netrc
+
+# local state (deck clone, queue, loop state, traces, dry-run archive)
+.looppp/
+wandb/
+weave/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# marimo session snapshots can contain cell outputs
+__marimo__/
