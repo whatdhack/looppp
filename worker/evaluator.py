@@ -78,7 +78,7 @@ def _(collections, repo_root):
     from looppp.envcheck import env_report, gpu_probe, missing_required
     from looppp.grade import GpuCheckError, KernelBenchGrader
     from looppp.problems import fetch_deck, list_problems
-    from looppp.queue.wandb_queue import WandbQueue
+    from looppp.queue.wandb_queue import WandbQueue, explain_wandb_error
     from looppp.traces import solution_from_run
     from looppp.worker import Worker, calibrate, new_worker_id
 
@@ -92,6 +92,7 @@ def _(collections, repo_root):
         calibrate,
         cfg,
         env_report,
+        explain_wandb_error,
         fetch_deck,
         gpu_probe,
         holder,
@@ -148,8 +149,8 @@ def _(cfg, mo):
 
 
 @app.cell
-def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_problems, gpu_probe, mo,
-      new_worker_id, sys):
+def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_problems, explain_wandb_error,
+      gpu_probe, mo, new_worker_id, sys):
     mo.stop(connect_form.value is None, mo.md("Fill in the form and press **Connect**."))
     _v = connect_form.value
     mo.stop(not _v["key"].strip() or not _v["entity"].strip(),
@@ -171,31 +172,39 @@ def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_prob
         ], selection=None, pagination=False)
 
     _sections = [mo.md("### Connection report")]
+    worker_id = new_worker_id("molab")
 
-    # 1) W&B
+    # 1) W&B: read access (identity, project queries)
     try:
         queue = WandbQueue(_v["entity"].strip(), _v["project"].strip(), api_key=_v["key"].strip())
         _viewer = queue.api.viewer
         _user = getattr(_viewer, "username", None) or getattr(_viewer, "name", "?")
         _hb = queue.worker_heartbeat_age()
         _sections.append(mo.callout(mo.md(
-            f"**W&B:** connected as **{_user}** to `{queue.entity}/{queue.project}`  \n"
+            f"**W&B read:** signed in as **{_user}**, project `{queue.entity}/{queue.project}`  \n"
             f"previous worker heartbeat: {'none' if _hb is None else f'{_hb / 60:.1f} min ago'}"), kind="success"))
-    except Exception as _e:  # never echo the exception text: it could contain request details
-        _sections.append(mo.callout(mo.md(f"**W&B:** connection failed (`{type(_e).__name__}`). "
-                                          "Check the key and that the entity is a team you belong to."),
+    except Exception as _e:
+        _sections.append(mo.callout(mo.md(f"**W&B read:** failed. {explain_wandb_error(_e, _v['entity'])}"),
                                     kind="danger"))
         mo.stop(True, mo.vstack(_sections))
 
-    # 2) deck
+    # 2) W&B: write access (the worker creates a run and updates candidate runs)
+    try:
+        queue.check_write_access(worker_id)
+        _sections.append(mo.callout(mo.md(f"**W&B write:** worker run `{worker_id}` created"), kind="success"))
+    except Exception as _e:
+        _sections.append(mo.callout(mo.md(f"**W&B write:** failed. {explain_wandb_error(_e, queue.entity)}"),
+                                    kind="danger"))
+        mo.stop(True, mo.vstack(_sections))
+
+    # 3) deck
     if not deck_problems:
         _sections.append(mo.callout(mo.md("**Deck:** not available, see section 2."), kind="danger"))
         mo.stop(True, mo.vstack(_sections))
     _sections.append(mo.callout(mo.md(f"**Deck:** `{cfg.deck.commit[:10]}`, {len(deck_problems)} problems"),
                                 kind="success"))
 
-    # 3) GPU + grader
-    worker_id = new_worker_id("molab")
+    # 4) GPU + grader
     _expected = _v["expected_gpu"].strip() or None
     try:
         grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
@@ -249,7 +258,7 @@ def _(cfg, deck_problems, mo):
 
 
 @app.cell
-def _(calib_form, calibrate, cfg, grader, holder, mo, queue, solution_from_run, worker_id):
+def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, queue, solution_from_run, worker_id):
     mo.stop(calib_form.value is None)
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
             mo.callout(mo.md("Stop the worker first: one GPU job at a time keeps timings clean."), kind="warn"))
@@ -258,8 +267,12 @@ def _(calib_form, calibrate, cfg, grader, holder, mo, queue, solution_from_run, 
     with mo.status.spinner(title=f"Calibrating {_p}: {calib_form.value['runs']} gradings..."):
         _code = solution_from_run(_t.run_id, cfg.path(".looppp/traces"))
         calib_report = calibrate(grader, _p, _code, calib_form.value["runs"], _t.published_peak_fraction)
-    queue.worker_log(worker_id, {f"calibration/{_p}": calib_report})
-    mo.callout(mo.md(f"```\n{calib_report}\n```"),
+    try:
+        queue.worker_log(worker_id, {f"calibration/{_p}": calib_report})
+        _logged = "Saved to the worker run in W&B."
+    except Exception as _e:
+        _logged = f"Not saved to W&B: {explain_wandb_error(_e, queue.entity)}"
+    mo.callout(mo.md(f"```\n{calib_report}\n```\n{_logged}"),
                kind="success" if calib_report.get("scored") else "danger")
     return
 
@@ -307,10 +320,13 @@ def _(mo):
 
 
 @app.cell
-def _(holder, mo, queue, refresh):
+def _(explain_wandb_error, holder, mo, queue, refresh):
     refresh.value  # re-run on every tick
     _w = holder["worker"]
-    _st = _w.status if _w is not None else {"state": "not started", "graded": 0, "errors": 0, "current": "", "last": None}
+    _st = _w.status if _w is not None else {"state": "not started", "graded": 0, "errors": 0, "current": "",
+                                           "last": None, "error": ""}
+    _error = (mo.callout(mo.md(f"**Worker stopped with an error:** {explain_wandb_error(Exception(_st['error']), queue.entity)}"),
+                         kind="danger") if _st.get("error") else mo.md(""))
     try:
         _rows = [{
             "status": r.status,
@@ -320,9 +336,10 @@ def _(holder, mo, queue, refresh):
             "model": r.spec.model, "hypothesis": r.spec.hypothesis[:90],
         } for r in queue.list_candidates(limit=15)]
     except Exception as _e:
-        _rows = [{"error": f"{type(_e).__name__}"}]
+        _rows = [{"error": explain_wandb_error(_e, queue.entity)}]
     _last = (_st.get("last") or {}).get("peak_fraction")
     mo.vstack([
+        _error,
         mo.hstack([mo.stat(str(_st["state"]), label="worker"), mo.stat(_st["graded"], label="graded"),
                    mo.stat(_st["errors"], label="errors"),
                    mo.stat(f"{_last:.4f}" if _last is not None else "-", label="last peak_fraction")]),

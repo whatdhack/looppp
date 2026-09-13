@@ -32,7 +32,7 @@ class Worker:
         self.log = log
         self.stop_event = threading.Event()
         self.status: dict = {"state": "idle", "graded": 0, "errors": 0, "current": "", "last": None,
-                             "started_ts": None, "worker_id": self.worker_id}
+                             "started_ts": None, "worker_id": self.worker_id, "error": ""}
         self._thread: threading.Thread | None = None
 
     # --- heartbeat ----------------------------------------------------------
@@ -49,10 +49,15 @@ class Worker:
 
     # --- main loop ----------------------------------------------------------
     def run(self, max_candidates: int | None = None, idle_exit_seconds: float | None = None) -> dict:
-        self.status.update(state="starting", started_ts=time.time())
+        self.status.update(state="starting", started_ts=time.time(), error="")
         desc = self.grader.describe()
-        self.queue.worker_log(self.worker_id, desc)
-        orphans = self.queue.requeue_orphans(self.max_attempts)
+        try:
+            self.queue.worker_log(self.worker_id, desc)
+            orphans = self.queue.requeue_orphans(self.max_attempts)
+        except Exception as e:  # noqa: BLE001 - in a thread nobody would see the traceback
+            self.status.update(state="failed", error=f"{type(e).__name__}: {e}")
+            self.log(f"worker could not start: {type(e).__name__}: {e}")
+            return self.status
         if orphans:
             self.log(f"re-queued / errored {len(orphans)} orphaned candidates")
         self._beat()  # creates the worker record before the heartbeat thread shares it

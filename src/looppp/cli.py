@@ -316,7 +316,14 @@ def main(argv: list[str] | None = None) -> None:
         "calibrate": cmd_calibrate, "trace-solution": cmd_trace_solution, "smoke-llm": cmd_smoke_llm,
         "smoke-queue": cmd_smoke_queue, "env": cmd_env,
     }[args.command]
-    handler(cfg, args)
+    try:
+        handler(cfg, args)
+    except Exception as e:
+        if type(e).__module__.startswith("wandb"):
+            from looppp.queue.wandb_queue import explain_wandb_error
+
+            sys.exit(f"W&B error: {explain_wandb_error(e, cfg.queue.entity or '')}".replace("**", ""))
+        raise
 
 
 if __name__ == "__main__":

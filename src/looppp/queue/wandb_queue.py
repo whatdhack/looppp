@@ -20,6 +20,25 @@ from looppp import contract as c
 from looppp.contract import CandidateRecord, CandidateSpec, GradeResult
 
 
+def explain_wandb_error(exc: BaseException, entity: str = "") -> str:
+    """Turn common W&B permission failures into an actionable message (no request details)."""
+    msg = str(exc)
+    low = msg.lower()
+    where = f"entity `{entity}`" if entity else "this entity"
+    if "models write access" in low or ("write access" in low and "org" in low):
+        return (f"This API key's user cannot create W&B runs in {where}: its **Models seat** in the organization "
+                "is Viewer or No access. looppp stores candidates, results and heartbeats as W&B runs (Models), "
+                "so it needs a **Full** Models seat. An org admin can set it at wandb.ai → Organization settings → "
+                "Users → MODELS SEAT = Full. Alternatively use a service-account key from a team whose "
+                "organization has Models, or an entity where you already have Models write access.")
+    if "permission" in low or "not authorized" in low or "403" in low:
+        return (f"W&B denied access to {where}/project. Check that the key belongs to a member of that team "
+                "and that the project name is right.")
+    if "401" in low or "invalid api key" in low or "unauthorized" in low:
+        return "W&B rejected the API key (invalid or revoked)."
+    return f"{type(exc).__name__}: {msg[:300]}"
+
+
 class WandbQueue:
     def __init__(self, entity: str, project: str, api_key: str | None = None, timeout: int = 60):
         if not entity:
@@ -171,6 +190,12 @@ class WandbQueue:
                 reinit="create_new", settings=self._settings(),
             )
         return self._worker_run
+
+    def check_write_access(self, worker_id: str) -> None:
+        """Create (or reuse) the worker run and write to it. Raises if the key cannot create runs,
+        so permission problems surface at connect time instead of inside the worker thread."""
+        run = self._ensure_worker_run(worker_id)
+        run.summary["connected_ts"] = time.time()
 
     def heartbeat(self, worker_id: str, info: dict) -> None:
         run = self._ensure_worker_run(worker_id)
