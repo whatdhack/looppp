@@ -22,9 +22,12 @@ from typing import Protocol
 
 from looppp import contract as c
 from looppp.contract import GradeResult
+from looppp.cudatk import find_cuda_home
 from looppp.envcheck import gpu_matches, gpu_probe
 from looppp.parsing import parse_benchmark, parse_check
 from looppp.problems import count_shapes, deck_head
+
+TOOLKIT_MISSING = "CUDA_HOME environment variable is not set"
 
 SENSITIVE_PREFIXES = ("WANDB_", "GITHUB_", "GH_", "GIT_ASKPASS", "HF_", "HUGGING_FACE", "OPENAI_",
                       "ANTHROPIC_", "MARIMO_", "AWS_", "GOOGLE_", "AZURE_", "OPENROUTER_")
@@ -96,7 +99,8 @@ class Grader(Protocol):
 class KernelBenchGrader:
     def __init__(self, deck_repo: Path, deck_subdir: str, problems_dir: str, expected_commit: str,
                  expected_gpu: str | None, check_timeout: float, bench_timeout: float,
-                 worker_id: str = "", python: str = sys.executable):
+                 worker_id: str = "", python: str = sys.executable, toolkit_root: Path | None = None):
+        self.toolkit_root = Path(toolkit_root) if toolkit_root else None
         self.repo = Path(deck_repo)
         self.subdir = deck_subdir
         self.deck_root = self.repo / deck_subdir
@@ -120,9 +124,14 @@ class KernelBenchGrader:
         t = self.probe.get("torch")
         self.torch = f"{t['torch']} (cuda {t['cuda']})" if isinstance(t, dict) else ""
 
+    def cuda_home(self) -> str | None:
+        """Looked up at every grading, so a toolkit installed after the grader was created is used."""
+        found = find_cuda_home([self.toolkit_root] if self.toolkit_root else [])
+        return found[0] if found else None
+
     def describe(self) -> dict:
         return {"gpu_name": self.gpu, "gpu_source": self.probe.get("source", ""), "torch_version": self.torch,
-                "deck_commit": self.expected_commit}
+                "deck_commit": self.expected_commit, "cuda_home": self.cuda_home() or ""}
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", "-C", str(self.repo), *args], capture_output=True, text=True)
@@ -151,10 +160,15 @@ class KernelBenchGrader:
         try:
             (pdir / c.SOLUTION_FILENAME).write_text(code)
             with tempfile.TemporaryDirectory(prefix="looppp-cache-") as cache:
-                env = scrubbed_env(extra={
+                extra = {
                     "TRITON_CACHE_DIR": f"{cache}/triton", "TORCH_EXTENSIONS_DIR": f"{cache}/torch_extensions",
                     "CUDA_CACHE_PATH": f"{cache}/nv", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
-                })
+                }
+                cuda_home = self.cuda_home()
+                if cuda_home:
+                    extra["CUDA_HOME"] = cuda_home
+                    extra["PATH"] = os.path.join(cuda_home, "bin") + os.pathsep + os.environ.get("PATH", "")
+                env = scrubbed_env(extra=extra)
                 chk = run_process([self.python, str(self.entrypoint), "check.py"], pdir, env, self.check_timeout)
                 check_tail = c.tail(chk.output)
                 if self._tampered(problem):
@@ -162,7 +176,12 @@ class KernelBenchGrader:
                                         fail_reason="grader files changed while check.py ran")
                 co = parse_check(chk.returncode, chk.output, chk.timed_out)
                 if not co.passed:
-                    return self._result(t0, correct=False, fail_stage=co.fail_stage, fail_reason=co.reason,
+                    stage, reason = co.fail_stage, co.reason
+                    if not cuda_home and TOOLKIT_MISSING in chk.output:
+                        stage = c.STAGE_TOOLCHAIN
+                        reason = ("solution builds a CUDA C++ extension but this worker has no CUDA toolkit "
+                                  "(nvcc); install it: evaluator section 2b or `looppp cuda-toolkit`")
+                    return self._result(t0, correct=False, fail_stage=stage, fail_reason=reason,
                                         check_tail=check_tail)
 
                 bench = run_process([self.python, str(self.entrypoint), "benchmark.py"], pdir, env, self.bench_timeout)

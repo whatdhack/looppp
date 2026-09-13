@@ -131,7 +131,7 @@ def cmd_worker(cfg: Config, args) -> None:
         w = cfg.worker
         grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                    cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds,
-                                   w.bench_timeout_seconds, worker_id=wid)
+                                   w.bench_timeout_seconds, worker_id=wid, toolkit_root=cfg.path(".looppp"))
     worker = Worker(queue, grader, poll_seconds=args.poll_seconds or cfg.worker.poll_seconds,
                     heartbeat_seconds=cfg.worker.heartbeat_seconds, max_attempts=cfg.queue.max_attempts)
     print(f"worker {wid} ({backend}) grading with {type(grader).__name__}; Ctrl+C to stop")
@@ -193,7 +193,7 @@ def cmd_calibrate(cfg: Config, args) -> None:
     w = cfg.worker
     grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds, w.bench_timeout_seconds,
-                               worker_id=new_worker_id("calibrate"))
+                               worker_id=new_worker_id("calibrate"), toolkit_root=cfg.path(".looppp"))
     code = solution_from_run(target.run_id, cfg.path(".looppp/traces"))
     report = calibrate(grader, target.problem, code, args.runs, target.published_peak_fraction)
     print(json.dumps({"target": args.target, **report}, indent=2))
@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--limit", type=int, default=30)
 
     cal = sub.add_parser("calibrate", help="grade a published KernelBench solution on this GPU")
-    cal.add_argument("--target", default="w4a16-triton-deepseek-v4-pro", help="name under calibration: in run.yaml")
+    cal.add_argument("--target", default="w4a16-triton-fable-5", help="name under calibration: in run.yaml")
     cal.add_argument("--runs", type=int, default=3)
     cal.add_argument("--install-cuda-toolkit", action="store_true")
 

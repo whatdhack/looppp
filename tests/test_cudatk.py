@@ -85,7 +85,7 @@ def test_find_cuda_home_env_and_activate(tmp_path, monkeypatch):
 def test_no_torch_reports_not_ok(tmp_path, monkeypatch):
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setattr(cudatk, "find_cuda_home", lambda: None)
+    monkeypatch.setattr(cudatk, "find_cuda_home", lambda roots=(): None)
     monkeypatch.setattr(cudatk, "torch_cuda_version", lambda python: None)
     rep = cudatk.ensure_cuda_toolkit("python", tmp_path, install=True)
     assert not rep.ok and "no CUDA build" in rep.log[0]

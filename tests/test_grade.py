@@ -82,3 +82,31 @@ def test_guards(fake_deck):
         _grader(fake_deck, check_timeout=1).__class__(
             fake_deck["repo"], fake_deck["subdir"], fake_deck["problems_dir"], fake_deck["commit"],
             expected_gpu="RTX PRO 6000", check_timeout=1, bench_timeout=1)
+
+
+def test_toolkit_missing_is_reported_as_toolchain(fake_deck, monkeypatch):
+    import looppp.grade as grade_mod
+    monkeypatch.setattr(grade_mod, "find_cuda_home", lambda roots=(): None)
+    code = ("raise OSError('CUDA_HOME environment variable is not set. Please set it to your CUDA install root.')\n"
+            "class Model:\n    def forward(self, x): return 2 * x\n")
+    r = _grader(fake_deck).grade("01_toy", code)
+    assert r.fail_stage == c.STAGE_TOOLCHAIN and "no CUDA toolkit" in r.fail_reason
+
+
+def test_built_toolkit_is_passed_to_grading(fake_deck, tmp_path, monkeypatch):
+    from looppp import cudatk
+    for var in ("CUDA_HOME", "CUDA_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(cudatk.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cudatk, "_valid_home", lambda p: bool(p) and (__import__("pathlib").Path(p) / "bin" / "nvcc").exists()
+                        and str(p) != "/usr/local/cuda")
+    home = tmp_path / "tk" / "cuda-13.0"
+    (home / "bin").mkdir(parents=True)
+    (home / "bin" / "nvcc").write_text("")
+    (home / cudatk.MARKER).write_text("x")
+    code = ("import os\nprint('CUDA_HOME_SEEN=' + os.environ.get('CUDA_HOME', ''))\n"
+            "class Model:\n    def forward(self, x): return 2 * x\n")
+    g = _grader(fake_deck, toolkit_root=tmp_path / "tk")
+    assert g.cuda_home() == str(home) and g.describe()["cuda_home"] == str(home)
+    r = g.grade("01_toy", code)
+    assert f"CUDA_HOME_SEEN={home}" in r.check_tail

@@ -47,6 +47,7 @@ STAGE_FORBIDDEN = "forbidden"        # check.py found a forbidden op
 STAGE_CHECK = "check"                # correctness failure
 STAGE_BENCHMARK = "benchmark"        # benchmark.py failed or produced no score
 STAGE_TIMEOUT = "timeout"
+STAGE_TOOLCHAIN = "toolchain"        # needed a compiler (nvcc) the worker does not have
 STAGE_TAMPER = "tamper"              # grader files changed during grading
 STAGE_WORKER_LOST = "worker_lost"
 STAGE_WORKER_EXCEPTION = "worker_exception"

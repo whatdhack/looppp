@@ -10,6 +10,7 @@ the graded one (an agent may try an experiment after its best result).
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,15 @@ def replay_solution(trace_lines, filename: str = "solution.py") -> str:
     if text is None:
         raise TraceReplayError(f"no Write of {filename} found in trace")
     return text
+
+
+_COMPILED_EXTENSION = re.compile(r"cpp_extension|load_inline|CUDAExtension|\bnvcc\b|\bcupy\b|nvrtc", re.I)
+
+
+def needs_cuda_toolkit(code: str) -> bool:
+    """True when the solution builds native code at import time (torch cpp_extension, NVRTC, CuPy),
+    i.e. it needs nvcc / CUDA headers on the grading box. Pure Triton does not."""
+    return bool(_COMPILED_EXTENSION.search(code))
 
 
 def solution_from_run(run_id: str, cache_dir: Path) -> str:

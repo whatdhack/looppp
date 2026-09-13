@@ -80,7 +80,7 @@ def _(collections, repo_root):
     from looppp.grade import GpuCheckError, KernelBenchGrader
     from looppp.problems import fetch_deck, list_problems
     from looppp.queue.wandb_queue import WandbQueue, explain_wandb_error
-    from looppp.traces import solution_from_run
+    from looppp.traces import needs_cuda_toolkit, solution_from_run
     from looppp.worker import Worker, calibrate, new_worker_id
 
     cfg = load_config(repo_root)
@@ -100,6 +100,7 @@ def _(collections, repo_root):
         holder,
         list_problems,
         missing_required,
+        needs_cuda_toolkit,
         new_worker_id,
         solution_from_run,
     )
@@ -134,17 +135,19 @@ def _(cfg, fetch_deck, list_problems, mo):
 
 @app.cell
 def _(mo):
-    cuda_btn = mo.ui.run_button(label="Install CUDA compiler from pip (~60 MB)", kind="neutral")
+    cuda_btn = mo.ui.run_button(label="Re-check / retry CUDA toolkit install", kind="neutral")
     cuda_btn
     return (cuda_btn,)
 
 
 @app.cell
 def _(cfg, cuda_btn, ensure_cuda_toolkit, holder, mo, sys):
-    # Always detect (cheap); install only when the button is pressed. activate() puts CUDA_HOME in
-    # os.environ, which grading subprocesses inherit, so no other cell has to re-run.
-    with mo.status.spinner(title="Installing nvcc and CUDA headers..." if cuda_btn.value else "Checking CUDA toolkit..."):
-        cuda_report = ensure_cuda_toolkit(sys.executable, cfg.path(".looppp"), install=bool(cuda_btn.value))
+    # Most strong KernelBench kernels build a C++/CUDA extension, so the toolkit is installed automatically
+    # on load (compiler wheels only, ~60 MB, torch's own CUDA libraries untouched). The button re-runs this
+    # cell. The grader looks the toolkit up at every grading, so no other cell has to re-run.
+    cuda_btn.value
+    with mo.status.spinner(title="Checking / installing CUDA toolkit (nvcc + headers)..."):
+        cuda_report = ensure_cuda_toolkit(sys.executable, cfg.path(".looppp"), install=True)
     holder["cuda_report"] = cuda_report
     if cuda_report.ok:
         _msg = mo.callout(mo.md(f"**CUDA toolkit ready:** `{cuda_report.cuda_home}` · nvcc {cuda_report.nvcc_version} "
@@ -152,12 +155,12 @@ def _(cfg, cuda_btn, ensure_cuda_toolkit, holder, mo, sys):
                                 "CUDA C++ (`load_inline`) and Triton solutions can both be graded."), kind="success")
     else:
         _msg = mo.callout(mo.md(
-            "**No CUDA toolkit.** Triton solutions grade fine; CUDA C++ (`load_inline`) solutions will fail with "
-            "`CUDA_HOME environment variable is not set`. Press the button above to install `nvcc` and headers "
-            f"from pip, matched to torch CUDA {cuda_report.torch_cuda or '?'} (torch's own libraries are untouched)."
+            "**CUDA toolkit install failed.** Triton solutions still grade; C++/CUDA extension solutions will "
+            f"fail with `toolchain`. torch CUDA: {cuda_report.torch_cuda or '?'}. Log below; press the button "
+            "above to retry."
             + ("\n\n```\n" + "\n".join(cuda_report.log)[-1500:] + "\n```" if cuda_report.log else "")),
-            kind="warn")
-    mo.vstack([mo.md("## 2b. CUDA toolkit (for CUDA C++ solutions)"), _msg])
+            kind="danger")
+    mo.vstack([mo.md("## 2b. CUDA toolkit (for C++/CUDA extension solutions)"), _msg])
     return
 
 
@@ -240,7 +243,8 @@ def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_prob
     try:
         grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                    cfg.deck.commit, _expected, cfg.worker.check_timeout_seconds,
-                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id)
+                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id,
+                                   toolkit_root=cfg.path(".looppp"))
     except GpuCheckError as _e:
         if not _v["allow_unverified_gpu"]:
             _torch = _e.probe.get("torch")
@@ -252,7 +256,8 @@ def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_prob
             mo.stop(True, mo.vstack(_sections))
         grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                    cfg.deck.commit, None, cfg.worker.check_timeout_seconds,
-                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id)
+                                   cfg.worker.bench_timeout_seconds, worker_id=worker_id,
+                                   toolkit_root=cfg.path(".looppp"))
         _sections.append(mo.callout(mo.md(f"**GPU:** check overridden ({_e}). Grades will record "
                                           f"gpu_name={grader.gpu!r}."), kind="warn"))
     except Exception as _e:
@@ -263,6 +268,11 @@ def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_prob
         _sections.append(mo.callout(mo.md(f"**GPU:** `{grader.gpu}` (via {grader.probe.get('source')})"),
                                     kind="success"))
 
+    _cuda_home = grader.cuda_home()
+    _sections.append(mo.callout(mo.md(
+        f"**CUDA toolkit:** `{_cuda_home}`" if _cuda_home else
+        "**CUDA toolkit:** none. CUDA C++ solutions will fail with `toolchain`; see section 2b."),
+        kind="success" if _cuda_home else "warn"))
     _sections += [
         _probe_table(grader.probe),
         mo.callout(mo.md(f"**Grader ready.** torch `{grader.torch}` · worker id `{worker_id}`  \n"
@@ -294,19 +304,19 @@ def _(cfg, deck_problems, mo):
 
 
 @app.cell
-def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, queue, solution_from_run, worker_id):
+def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, needs_cuda_toolkit, queue,
+      solution_from_run, worker_id):
     mo.stop(calib_form.value is None)
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
             mo.callout(mo.md("Stop the worker first: one GPU job at a time keeps timings clean."), kind="warn"))
     _name = calib_form.value["target"]
     _t = cfg.calibration[_name]
     _p = _t.problem
-    _cuda = holder.get("cuda_report")
-    mo.stop(_t.needs_cuda_toolkit and not (_cuda and _cuda.ok),
-            mo.callout(mo.md(f"`{_name}` compiles CUDA C++ and needs the CUDA toolkit: install it in section 2b "
-                             "first, or pick a Triton target."), kind="warn"))
+    _code = solution_from_run(_t.run_id, cfg.path(".looppp/traces"))
+    mo.stop(needs_cuda_toolkit(_code) and not grader.cuda_home(),
+            mo.callout(mo.md(f"`{_name}` builds a C++/CUDA extension and this worker has no CUDA toolkit. "
+                             "Fix section 2b first, or pick a Triton target."), kind="warn"))
     with mo.status.spinner(title=f"Calibrating {_name}: {calib_form.value['runs']} gradings..."):
-        _code = solution_from_run(_t.run_id, cfg.path(".looppp/traces"))
         calib_report = {"target": _name, **calibrate(grader, _p, _code, calib_form.value["runs"],
                                                       _t.published_peak_fraction)}
     try:

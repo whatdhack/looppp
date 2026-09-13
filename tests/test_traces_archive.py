@@ -54,3 +54,10 @@ def test_archive_git_commit_only_archive_paths(tmp_path):
     files = git("show", "--name-only", "--format=", "HEAD").stdout.split()
     assert sorted(files) == ["archive/p/best.json", "archive/p/best.py"]
     assert "A  unrelated.txt" in git("status", "--porcelain").stdout
+
+
+def test_needs_cuda_toolkit_detection():
+    from looppp.traces import needs_cuda_toolkit
+    assert needs_cuda_toolkit("from torch.utils.cpp_extension import load\nmod = load(name='x', sources=[])")
+    assert needs_cuda_toolkit("from torch.utils.cpp_extension import load_inline")
+    assert not needs_cuda_toolkit("import triton\nimport triton.language as tl\n@triton.jit\ndef k(): pass")

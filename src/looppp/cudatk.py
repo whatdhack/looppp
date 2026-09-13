@@ -55,7 +55,9 @@ def nvcc_release(cuda_home: Path | str) -> str:
     return m.group(1) if rc == 0 and m else ""
 
 
-def find_cuda_home() -> tuple[str, str] | None:
+def find_cuda_home(search_roots: list[Path] | tuple[Path, ...] = ()) -> tuple[str, str] | None:
+    """Existing toolkit: $CUDA_HOME/$CUDA_PATH, nvcc on PATH, /usr/local/cuda, then any
+    CUDA_HOME looppp assembled earlier under *search_roots* (newest first)."""
     for var in ("CUDA_HOME", "CUDA_PATH"):
         if _valid_home(os.environ.get(var)):
             return os.environ[var], "env"
@@ -66,6 +68,10 @@ def find_cuda_home() -> tuple[str, str] | None:
             return str(home), "PATH"
     if _valid_home("/usr/local/cuda"):
         return "/usr/local/cuda", "/usr/local/cuda"
+    built = [m.parent for root in search_roots for m in Path(root).glob(f"cuda-*/{MARKER}")
+             if _valid_home(m.parent)]
+    if built:
+        return str(max(built, key=lambda p: (p / MARKER).stat().st_mtime)), "looppp-built"
     return None
 
 
@@ -191,7 +197,10 @@ def activate(cuda_home: str | Path) -> None:
 
 def ensure_cuda_toolkit(python: str = sys.executable, build_root: Path = Path(".looppp"),
                         install: bool = True) -> ToolkitReport:
-    found = find_cuda_home()
+    found = find_cuda_home([Path(build_root)])
+    if found and found[1] == "looppp-built":
+        ok, _ = compile_check(found[0], Path(build_root) / "cuda-probe")
+        found = found if ok else None  # rebuild below if the earlier assembly no longer works
     if found:
         rep = ToolkitReport(True, found[0], found[1], torch_cuda_version(python), nvcc_release(found[0]))
         activate(found[0])

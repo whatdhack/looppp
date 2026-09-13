@@ -58,7 +58,7 @@ empty replies until `max_tokens` is raised (configs/models.yaml).
    has the CUDA runtime but no `nvcc`, and CUDA C++ (`load_inline`) kernels need it. Triton kernels don't.
 4. **3. Connect**: paste a W&B **service-account** key, enter the team entity, then press Connect.
 5. **4. Calibrate** (once per session): grades a published KernelBench solution and compares it with
-   its leaderboard score. `w4a16-triton-deepseek-v4-pro` works without the toolkit.
+   its leaderboard score. `w4a16-triton-fable-5` and `paged-attention-triton-opus-4-8` work without the toolkit.
 6. **5. Worker** → **Start worker**. Keep the tab open.
 
 ### 5. Real loop on WSL
