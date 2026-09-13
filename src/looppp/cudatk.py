@@ -124,7 +124,10 @@ def compile_check(cuda_home: Path | str, workdir: Path) -> tuple[bool, str]:
     src, exe = workdir / "looppp_probe.cu", workdir / "looppp_probe"
     src.write_text(_PROBE_KERNEL)
     home = Path(cuda_home)
-    rc, out = _run([str(home / "bin" / "nvcc"), "-O1", str(src), "-o", str(exe), f"-L{home / 'lib64'}", "-lcudart"], 300)
+    # -I$CUDA_HOME/include exactly like torch.utils.cpp_extension: nvcc's implicit headers are otherwise looked
+    # up next to its *real* location, which lacks the runtime headers when wheels are split across site dirs.
+    rc, out = _run([str(home / "bin" / "nvcc"), "-O1", f"-I{home / 'include'}", str(src), "-o", str(exe),
+                    f"-L{home / 'lib64'}", "-lcudart"], 300)
     return rc == 0 and exe.exists(), out[-1500:]
 
 
@@ -144,17 +147,50 @@ def purelib(python: str = sys.executable) -> Path:
     return Path(out.strip().splitlines()[-1])
 
 
-def build_cuda_home(nvidia_dir: Path, dest: Path) -> Path:
-    """Assemble a CUDA_HOME from pip-installed NVIDIA wheels under *nvidia_dir* (site-packages/nvidia)."""
-    nvidia_dir, dest = Path(nvidia_dir), Path(dest)
-    if (nvidia_dir / "cu13" / "bin" / "nvcc").exists():
-        sources = [nvidia_dir / "cu13"]
-    else:
-        sources = sorted(d for d in nvidia_dir.iterdir() if d.is_dir() and not d.name.startswith("__"))
-        # put the compiler package first so its bin/ and nvvm/ win
-        sources.sort(key=lambda d: 0 if (d / "bin" / "nvcc").exists() else 1)
+def nvidia_dirs(python: str = sys.executable) -> list[Path]:
+    """Every ``<site-packages>/nvidia`` visible to *python*, in sys.path order.
+
+    A venv that also sees the system site-packages (molab runs the kernel from /tmp/uv-venv while torch
+    and its NVIDIA wheels live in /usr/local/lib/python3.x/site-packages) splits the wheels across
+    several directories, so the venv's own purelib alone is not enough."""
+    code = ("import json, os, sys\n"
+            "print(json.dumps([p for p in sys.path if p and os.path.isdir(os.path.join(p, 'nvidia'))]))")
+    rc, out = _run([python, "-c", code], 60)
+    found: list[Path] = []
+    try:
+        paths = json.loads(out.strip().splitlines()[-1]) if rc == 0 else []
+    except (json.JSONDecodeError, IndexError):
+        paths = []
+    for p in paths + [str(purelib(python))]:
+        d = Path(p) / "nvidia"
+        if d.is_dir() and d.resolve() not in [f.resolve() for f in found]:
+            found.append(d)
+    return found
+
+
+def _sources(nvidia_dirs: list[Path], prefer_cu13: bool) -> list[Path]:
+    """Component roots to merge, compiler first, then the tree matching torch's CUDA major."""
+    cu13, components = [], []
+    for d in nvidia_dirs:
+        if (d / "cu13").is_dir():
+            cu13.append(d / "cu13")
+        components += sorted(x for x in d.iterdir() if x.is_dir() and x.name != "cu13" and not x.name.startswith("__"))
+    ordered = cu13 + components if prefer_cu13 else components + cu13
+    return sorted(ordered, key=lambda x: 0 if (x / "bin" / "nvcc").exists() else 1)  # stable: keeps preference
+
+
+def build_cuda_home(nvidia_dir: Path | list[Path], dest: Path, prefer_cu13: bool = True) -> Path:
+    """Assemble a CUDA_HOME from pip-installed NVIDIA wheels under one or more ``site-packages/nvidia``
+    directories. The first source providing a file wins, so the compiler package and the tree matching
+    torch's CUDA major come first."""
+    dirs = [Path(d) for d in (nvidia_dir if isinstance(nvidia_dir, (list, tuple)) else [nvidia_dir])]
+    dirs = [d for d in dirs if d.is_dir()]
+    if not dirs:
+        raise FileNotFoundError("no site-packages/nvidia directory is visible to this Python")
+    dest = Path(dest)
+    sources = _sources(dirs, prefer_cu13)
     if not any((s / "bin" / "nvcc").exists() for s in sources):
-        raise FileNotFoundError(f"no nvcc under {nvidia_dir}")
+        raise FileNotFoundError(f"no nvcc under {', '.join(map(str, dirs))}")
 
     if dest.exists():
         if not (dest / MARKER).exists():
@@ -237,7 +273,7 @@ def ensure_cuda_toolkit(python: str = sys.executable, build_root: Path = Path(".
     home = Path(build_root) / f"cuda-{rep.torch_cuda}"
     for attempt in (1, 2):
         try:
-            build_cuda_home(purelib(python) / "nvidia", home)
+            build_cuda_home(nvidia_dirs(python), home, prefer_cu13=int(rep.torch_cuda.split(".")[0]) >= 13)
         except (OSError, ValueError) as e:
             rep.log.append(f"could not assemble CUDA_HOME: {type(e).__name__}: {e}")
             return rep

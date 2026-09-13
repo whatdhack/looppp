@@ -89,3 +89,37 @@ def test_no_torch_reports_not_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(cudatk, "torch_cuda_version", lambda python: None)
     rep = cudatk.ensure_cuda_toolkit("python", tmp_path, install=True)
     assert not rep.ok and "no CUDA build" in rep.log[0]
+
+
+def test_build_cuda_home_split_across_site_packages(tmp_path):
+    """molab: nvcc in the venv, torch's CUDA runtime in the system site-packages (or vice versa)."""
+    venv_nv = tmp_path / "venv" / "site-packages" / "nvidia"
+    system_nv = tmp_path / "usr" / "site-packages" / "nvidia"
+    _touch(venv_nv / "cu13" / "bin" / "nvcc", exe=True)
+    _touch(venv_nv / "cu13" / "nvvm" / "bin" / "cicc", exe=True)
+    _touch(venv_nv / "cu13" / "include" / "crt" / "host_config.h")
+    _touch(system_nv / "cu13" / "include" / "cuda.h")
+    _touch(system_nv / "cu13" / "include" / "cublas_v2.h")
+    _touch(system_nv / "cu13" / "lib" / "libcudart.so.13")
+    _touch(system_nv / "cublas" / "include" / "cublas_v2.h", "cu12 leftover")   # must not win over cu13
+    home = cudatk.build_cuda_home([system_nv, venv_nv], tmp_path / "cuda-13.0")
+    assert (home / "bin" / "nvcc").exists() and (home / "nvvm").exists()
+    assert (home / "include" / "cuda.h").exists() and (home / "include" / "crt").exists()
+    assert os.path.realpath(home / "include" / "cublas_v2.h") == str((system_nv / "cu13" / "include" / "cublas_v2.h").resolve())
+    assert (home / "lib64" / "libcudart.so").exists()
+    with pytest.raises(FileNotFoundError, match="no site-packages/nvidia"):
+        cudatk.build_cuda_home([tmp_path / "missing"], tmp_path / "x")
+
+
+def test_nvidia_dirs_uses_sys_path_of_target_python(tmp_path, monkeypatch):
+    import json
+    a, b = tmp_path / "a", tmp_path / "b"
+    (a / "nvidia").mkdir(parents=True)
+    (b / "nvidia").mkdir(parents=True)
+
+    def fake_run(cmd, timeout=120):
+        if "sys.path" in cmd[-1]:
+            return 0, json.dumps([str(a), str(b), str(a)])
+        return 0, str(tmp_path / "venv-purelib")
+    monkeypatch.setattr(cudatk, "_run", fake_run)
+    assert cudatk.nvidia_dirs("python") == [a / "nvidia", b / "nvidia"]
