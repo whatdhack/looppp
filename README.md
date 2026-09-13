@@ -40,6 +40,10 @@ Both modes use the same agent, grader, prompts and safety checks.
 
 **You need:** a molab account and a W&B API key. A W&B team entity is optional (usage attribution, logging).
 
+<img src="docs/images/loop-tour.gif" alt="Tour of the single notebook: attach the GPU, settings and model test, live progress, best kernel" width="760">
+
+<sub>Regenerate after replacing screenshots: `uv run --with pillow python docs/make_tour_gif.py`</sub>
+
 1. **Open** [`notebooks/loop.py` in molab](https://molab.marimo.io/github/whatdhack/looppp/blob/main/notebooks/loop.py)
    and attach the **RTX PRO 6000** (resources button in the header → GPUs → *Save and restart*). Run all cells.
 
