@@ -182,7 +182,7 @@ def cmd_cuda_toolkit(cfg: Config, args) -> None:
 
 def cmd_calibrate(cfg: Config, args) -> None:
     from looppp.grade import KernelBenchGrader
-    from looppp.traces import calibration_solution
+    from looppp.traces import calibration_solution, published_run_detail
     from looppp.worker import calibrate, new_worker_id
 
     target = cfg.calibration.get(args.target)
@@ -195,7 +195,11 @@ def cmd_calibrate(cfg: Config, args) -> None:
                                cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds, w.bench_timeout_seconds,
                                worker_id=new_worker_id("calibrate"), toolkit_root=cfg.path(".looppp"))
     code, source = calibration_solution(target.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))
-    report = calibrate(grader, target.problem, code, args.runs, target.published_peak_fraction)
+    try:
+        shapes = published_run_detail(target.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))["shapes"]
+    except Exception:  # noqa: BLE001 - per-shape comparison is optional
+        shapes = None
+    report = calibrate(grader, target.problem, code, args.runs, target.published_peak_fraction, published_shapes=shapes)
     print(json.dumps({"target": args.target, "solution_source": source, **report}, indent=2))
 
 

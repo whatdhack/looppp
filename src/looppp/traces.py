@@ -142,6 +142,19 @@ def published_solution(run_id: str, repo_url: str, commit: str, cache_dir: Path,
     return code
 
 
+def published_run_detail(run_id: str, repo_url: str, commit: str, cache_dir: Path, timeout: float = 60.0) -> dict:
+    """KernelBench's public/data/rundetail/<run_id>.json: per-shape ms and peak fraction on its GPU."""
+    cache = Path(cache_dir) / "rundetail" / f"{run_id}.json"
+    if not (cache.exists() and cache.stat().st_size > 0):
+        url = (f"https://raw.githubusercontent.com/{github_slug(repo_url)}/{commit}"
+               f"/public/data/rundetail/{run_id}.json")
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = r.read()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(data)
+    return json.loads(cache.read_text())
+
+
 def calibration_solution(run_id: str, repo_url: str, commit: str, cache_dir: Path) -> tuple[str, str]:
     """(code, source): the published graded kernel, else a trace replay (clearly labelled)."""
     try:

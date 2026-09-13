@@ -80,7 +80,7 @@ def _(collections, repo_root):
     from looppp.grade import GpuCheckError, KernelBenchGrader
     from looppp.problems import fetch_deck, list_problems
     from looppp.queue.wandb_queue import WandbQueue, explain_wandb_error
-    from looppp.traces import calibration_solution, needs_cuda_toolkit
+    from looppp.traces import calibration_solution, needs_cuda_toolkit, published_run_detail
     from looppp.worker import Worker, calibrate, new_worker_id
 
     cfg = load_config(repo_root)
@@ -103,6 +103,7 @@ def _(collections, repo_root):
         missing_required,
         needs_cuda_toolkit,
         new_worker_id,
+        published_run_detail,
     )
 
 
@@ -308,7 +309,7 @@ def _(cfg, deck_problems, mo):
 
 @app.cell
 def _(calib_form, calibrate, calibration_solution, cfg, explain_wandb_error, grader, holder, mo,
-      needs_cuda_toolkit, queue, worker_id):
+      needs_cuda_toolkit, published_run_detail, queue, worker_id):
     mo.stop(calib_form.value is None)
     mo.stop(grader is None or queue is None, mo.callout(mo.md("**Not connected.** Complete section 3 (Connect) first; its report shows what is missing."), kind="warn"))
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
@@ -324,15 +325,24 @@ def _(calib_form, calibrate, calibration_solution, cfg, explain_wandb_error, gra
             mo.callout(mo.md(f"`{_name}` builds a C++/CUDA extension and this worker has no CUDA toolkit. "
                              "Fix section 2b first, or pick a Triton target."), kind="warn"))
     with mo.status.spinner(title=f"Calibrating {_name}: {calib_form.value['runs']} gradings..."):
-        calib_report = {"target": _name, "solution_source": _source, **calibrate(grader, _p, _code, calib_form.value["runs"],
-                                                      _t.published_peak_fraction)}
+        try:
+            _shapes = published_run_detail(_t.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))["shapes"]
+        except Exception:
+            _shapes = None
+        calib_report = {"target": _name, "solution_source": _source,
+                        **calibrate(grader, _p, _code, calib_form.value["runs"], _t.published_peak_fraction,
+                                    published_shapes=_shapes)}
     try:
         queue.worker_log(worker_id, {f"calibration/{_name}": calib_report})
         _logged = "Saved to the worker run in W&B."
     except Exception as _e:
         _logged = f"Not saved to W&B: {explain_wandb_error(_e, queue.entity)}"
-    mo.callout(mo.md(f"```\n{calib_report}\n```\n{_logged}"),
-               kind="success" if calib_report.get("scored") else "danger")
+    _summary = {k: v for k, v in calib_report.items() if k not in ("per_shape", "diagnosis")}
+    mo.vstack([
+        mo.callout(mo.md(f"```\n{_summary}\n```\n{_logged}"), kind="success" if calib_report.get("scored") else "danger"),
+        mo.md(f"**Diagnosis:** {calib_report['diagnosis']}") if calib_report.get("diagnosis") else mo.md(""),
+        mo.ui.table(calib_report["per_shape"], selection=None, pagination=False) if calib_report.get("per_shape") else mo.md(""),
+    ])
     return
 
 

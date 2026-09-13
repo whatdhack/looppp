@@ -139,20 +139,56 @@ class Worker:
 
 
 def calibrate(grader: Grader, problem: str, code: str, runs: int = 3,
-              published_peak_fraction: float | None = None) -> dict:
-    """Grade a known published solution several times on this GPU."""
+              published_peak_fraction: float | None = None, published_shapes: list[dict] | None = None) -> dict:
+    """Grade a known published solution several times on this GPU.
+
+    ``published_shapes`` (KernelBench rundetail ``shapes``: idx, label, ms, frac) adds a per-shape
+    comparison. A gap concentrated on the fastest calls points at CPU / kernel-launch overhead
+    (molab notebooks have 4 shared CPUs); a uniform gap points at GPU throughput.
+    """
     results = [grader.grade(problem, code) for _ in range(runs)]
-    scores = [r.peak_fraction for r in results if r.scored]
+    scored = [r for r in results if r.scored]
+    scores = [r.peak_fraction for r in scored]
     report = {
         "problem": problem, "runs": runs, "scored": len(scores),
         "fail_stages": [r.fail_stage for r in results if not r.scored],
         "published": published_peak_fraction,
     }
-    if scores:
-        report.update(mean=round(statistics.fmean(scores), 4), min=min(scores), max=max(scores))
-        if published_peak_fraction:
-            report["ratio_to_published"] = round(report["mean"] / published_peak_fraction, 3)
-    else:
+    if not scores:
         first = results[0] if results else None
         report["first_failure"] = (first.fail_reason, first.check_tail[-1500:]) if first else None
+        return report
+
+    report.update(mean=round(statistics.fmean(scores), 4), min=min(scores), max=max(scores))
+    if published_peak_fraction:
+        report["ratio_to_published"] = round(report["mean"] / published_peak_fraction, 3)
+
+    n_shapes = min(len(r.shape_fractions) for r in scored)
+    here = [round(statistics.fmean(r.shape_fractions[i] for r in scored), 4) for i in range(n_shapes)]
+    report["shape_fractions"] = here
+    if published_shapes and len(published_shapes) == n_shapes:
+        rows = []
+        for i, pub in enumerate(sorted(published_shapes, key=lambda s: s["idx"])):
+            ratio = round(here[i] / pub["frac"], 3) if pub.get("frac") else None
+            rows.append({"shape": pub.get("label", str(i)), "published_ms": pub.get("ms"), "bound": pub.get("bound"),
+                         "published_frac": pub.get("frac"), "here_frac": here[i], "ratio": ratio})
+        report["per_shape"] = rows
+        report["diagnosis"] = _diagnose(rows)
     return report
+
+
+def _diagnose(rows: list[dict]) -> str:
+    usable = [r for r in rows if r["ratio"] is not None and r["published_ms"]]
+    if len(usable) < 2:
+        return "not enough per-shape data"
+    fastest = min(usable, key=lambda r: r["published_ms"])
+    slowest = max(usable, key=lambda r: r["published_ms"])
+    spread = max(r["ratio"] for r in usable) - min(r["ratio"] for r in usable)
+    if spread < 0.08:
+        return (f"uniform gap (ratios {min(r['ratio'] for r in usable)}-{max(r['ratio'] for r in usable)}): "
+                "GPU throughput differs (power limit, SKU variant, driver/torch/triton versions)")
+    if fastest["ratio"] < slowest["ratio"] - 0.05:
+        return (f"gap is largest on the fastest call ({fastest['shape']}, {fastest['published_ms']} ms: "
+                f"ratio {fastest['ratio']}) and smallest on the slowest ({slowest['shape']}, "
+                f"{slowest['published_ms']} ms: ratio {slowest['ratio']}): CPU / kernel-launch overhead dominates")
+    return "mixed per-shape gaps: compare the per_shape rows"
