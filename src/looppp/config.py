@@ -71,8 +71,10 @@ class WorkerSettings:
 
 @dataclass
 class CalibrationTarget:
+    problem: str
     run_id: str
     published_peak_fraction: float
+    needs_cuda_toolkit: bool = False   # solution compiles CUDA C++ (load_inline) and needs nvcc
 
 
 @dataclass

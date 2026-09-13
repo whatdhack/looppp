@@ -75,6 +75,7 @@ def _(Path, importlib, mo, subprocess, sys):
 @app.cell
 def _(collections, repo_root):
     from looppp.config import load_config
+    from looppp.cudatk import ensure_cuda_toolkit
     from looppp.envcheck import env_report, gpu_probe, missing_required
     from looppp.grade import GpuCheckError, KernelBenchGrader
     from looppp.problems import fetch_deck, list_problems
@@ -91,6 +92,7 @@ def _(collections, repo_root):
         Worker,
         calibrate,
         cfg,
+        ensure_cuda_toolkit,
         env_report,
         explain_wandb_error,
         fetch_deck,
@@ -128,6 +130,35 @@ def _(cfg, fetch_deck, list_problems, mo):
         _msg = mo.callout(mo.md(f"Deck fetch failed: `{type(_e).__name__}: {_e}`"), kind="danger")
     mo.vstack([mo.md("## 2. KernelBench deck"), _msg])
     return (deck_problems,)
+
+
+@app.cell
+def _(mo):
+    cuda_btn = mo.ui.run_button(label="Install CUDA compiler from pip (~60 MB)", kind="neutral")
+    cuda_btn
+    return (cuda_btn,)
+
+
+@app.cell
+def _(cfg, cuda_btn, ensure_cuda_toolkit, holder, mo, sys):
+    # Always detect (cheap); install only when the button is pressed. activate() puts CUDA_HOME in
+    # os.environ, which grading subprocesses inherit, so no other cell has to re-run.
+    with mo.status.spinner(title="Installing nvcc and CUDA headers..." if cuda_btn.value else "Checking CUDA toolkit..."):
+        cuda_report = ensure_cuda_toolkit(sys.executable, cfg.path(".looppp"), install=bool(cuda_btn.value))
+    holder["cuda_report"] = cuda_report
+    if cuda_report.ok:
+        _msg = mo.callout(mo.md(f"**CUDA toolkit ready:** `{cuda_report.cuda_home}` · nvcc {cuda_report.nvcc_version} "
+                                f"(via {cuda_report.source}) · torch CUDA {cuda_report.torch_cuda}  \n"
+                                "CUDA C++ (`load_inline`) and Triton solutions can both be graded."), kind="success")
+    else:
+        _msg = mo.callout(mo.md(
+            "**No CUDA toolkit.** Triton solutions grade fine; CUDA C++ (`load_inline`) solutions will fail with "
+            "`CUDA_HOME environment variable is not set`. Press the button above to install `nvcc` and headers "
+            f"from pip, matched to torch CUDA {cuda_report.torch_cuda or '?'} (torch's own libraries are untouched)."
+            + ("\n\n```\n" + "\n".join(cuda_report.log)[-1500:] + "\n```" if cuda_report.log else "")),
+            kind="warn")
+    mo.vstack([mo.md("## 2b. CUDA toolkit (for CUDA C++ solutions)"), _msg])
+    return
 
 
 @app.cell
@@ -243,15 +274,20 @@ def _(GpuCheckError, KernelBenchGrader, WandbQueue, cfg, connect_form, deck_prob
 
 @app.cell
 def _(cfg, deck_problems, mo):
-    _choices = [p for p in cfg.calibration if p in deck_problems]
+    _options = {
+        f"{name} ({t.problem}, published {t.published_peak_fraction:.3f}"
+        f"{', needs CUDA toolkit' if t.needs_cuda_toolkit else ', Triton'})": name
+        for name, t in cfg.calibration.items() if t.problem in deck_problems
+    }
     calib_form = mo.ui.dictionary({
-        "problem": mo.ui.dropdown(_choices, value=_choices[0] if _choices else None, label="problem"),
+        "target": mo.ui.dropdown(_options, value=next(iter(_options), None), label="published solution"),
         "runs": mo.ui.slider(1, 5, value=3, show_value=True, label="runs"),
     }).form(submit_button_label="Run calibration")
     mo.vstack([
         mo.md("## 4. Calibrate this GPU (recommended once per session)\nRebuilds a published KernelBench "
               "solution from its HuggingFace trace and grades it here. A ratio well below 1.0 means this GPU is "
-              "slower than KernelBench's; looppp scores then compare with each other, not with the leaderboard."),
+              "slower than KernelBench's; looppp scores then compare with each other, not with the leaderboard. "
+              "Targets marked *needs CUDA toolkit* require section 2b."),
         calib_form,
     ])
     return (calib_form,)
@@ -262,13 +298,19 @@ def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, queue
     mo.stop(calib_form.value is None)
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
             mo.callout(mo.md("Stop the worker first: one GPU job at a time keeps timings clean."), kind="warn"))
-    _p = calib_form.value["problem"]
-    _t = cfg.calibration[_p]
-    with mo.status.spinner(title=f"Calibrating {_p}: {calib_form.value['runs']} gradings..."):
+    _name = calib_form.value["target"]
+    _t = cfg.calibration[_name]
+    _p = _t.problem
+    _cuda = holder.get("cuda_report")
+    mo.stop(_t.needs_cuda_toolkit and not (_cuda and _cuda.ok),
+            mo.callout(mo.md(f"`{_name}` compiles CUDA C++ and needs the CUDA toolkit: install it in section 2b "
+                             "first, or pick a Triton target."), kind="warn"))
+    with mo.status.spinner(title=f"Calibrating {_name}: {calib_form.value['runs']} gradings..."):
         _code = solution_from_run(_t.run_id, cfg.path(".looppp/traces"))
-        calib_report = calibrate(grader, _p, _code, calib_form.value["runs"], _t.published_peak_fraction)
+        calib_report = {"target": _name, **calibrate(grader, _p, _code, calib_form.value["runs"],
+                                                      _t.published_peak_fraction)}
     try:
-        queue.worker_log(worker_id, {f"calibration/{_p}": calib_report})
+        queue.worker_log(worker_id, {f"calibration/{_name}": calib_report})
         _logged = "Saved to the worker run in W&B."
     except Exception as _e:
         _logged = f"Not saved to W&B: {explain_wandb_error(_e, queue.entity)}"

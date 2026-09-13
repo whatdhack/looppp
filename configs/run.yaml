@@ -43,10 +43,20 @@ worker:
 
 # Published KernelBench RTX PRO 6000 runs used to calibrate a molab GPU.
 # The worker rebuilds solution.py from the HuggingFace trace and grades it.
+# needs_cuda_toolkit: the solution compiles CUDA C++ with load_inline (nvcc required).
 calibration:
-  07_w4a16_gemm:
+  w4a16-triton-deepseek-v4-pro:
+    problem: 07_w4a16_gemm
+    run_id: 20260813_073022_deepseek-claude_deepseek-v4-pro_07_w4a16_gemm
+    published_peak_fraction: 0.3103
+    needs_cuda_toolkit: false
+  w4a16-cuda-kinetic-0715:
+    problem: 07_w4a16_gemm
     run_id: 20260716_112718_kinetic-claude_kinetic-0715_07_w4a16_gemm
     published_peak_fraction: 0.3733
-  03_paged_attention:
+    needs_cuda_toolkit: true
+  paged-attention-triton-opus-4-8:
+    problem: 03_paged_attention
     run_id: 20260613_042305_claude_claude-opus-4-8_03_paged_attention
     published_peak_fraction: 0.6706
+    needs_cuda_toolkit: false

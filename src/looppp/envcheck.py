@@ -99,9 +99,15 @@ def env_report(python: str = sys.executable, expected_gpu: str | None = "RTX PRO
     ok, out = _sh(f"{python} -c \"import triton;print(triton.__version__)\"")
     add("triton", ok, out)
 
-    nvcc = shutil.which("nvcc") or next((p for p in ("/usr/local/cuda/bin/nvcc",) if os.path.exists(p)), None)
-    add("nvcc (CUDA C++/CUTLASS solutions)", bool(nvcc), nvcc or "not found: Triton-only solutions will work",
+    from looppp.cudatk import find_cuda_home
+
+    home = find_cuda_home()
+    add("CUDA toolkit / nvcc (CUDA C++ load_inline solutions)", bool(home),
+        f"{home[0]} (via {home[1]})" if home else "not found: Triton works; install it in section 2b for CUDA C++",
         required=False)
+    cxx = shutil.which("g++") or shutil.which("c++")
+    add("host C/C++ compiler (Triton launcher, nvcc host)", bool(shutil.which("gcc") or shutil.which("cc")) and bool(cxx),
+        f"gcc={shutil.which('gcc') or shutil.which('cc')} g++={cxx}")
 
     for mod in ("yaml", "hypothesis", "einops", "numpy", "ninja"):
         ok, out = _sh(f"{python} -c \"import {mod}\"")

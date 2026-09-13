@@ -54,10 +54,12 @@ empty replies until `max_tokens` is raised (configs/models.yaml).
 
 1. Click **Open in molab** above and attach the **RTX PRO 6000** (notebook specs button).
 2. **1. Environment**: every required row must be green.
-3. **3. Connect**: paste a W&B **service-account** key, enter the team entity, then press Connect.
-4. **4. Calibrate** (once per session): grades a published KernelBench solution and compares it with
-   its leaderboard score.
-5. **5. Worker** → **Start worker**. Keep the tab open.
+3. **2b. CUDA toolkit**: press *Install CUDA compiler from pip* if it shows "No CUDA toolkit". molab's torch
+   has the CUDA runtime but no `nvcc`, and CUDA C++ (`load_inline`) kernels need it. Triton kernels don't.
+4. **3. Connect**: paste a W&B **service-account** key, enter the team entity, then press Connect.
+5. **4. Calibrate** (once per session): grades a published KernelBench solution and compares it with
+   its leaderboard score. `w4a16-triton-deepseek-v4-pro` works without the toolkit.
+6. **5. Worker** → **Start worker**. Keep the tab open.
 
 ### 5. Real loop on WSL
 
@@ -78,7 +80,8 @@ resumes when a worker is back. After `queue.max_worker_down_hours` it stops with
 | `looppp worker` | GPU box / any (`--fake`) | Evaluator loop outside the notebook |
 | `looppp status` | anywhere | Worker heartbeat age and recent candidates |
 | `looppp fetch-deck` | anywhere | Pinned KernelBench deck |
-| `looppp calibrate --problem P` | GPU box | Grade the published solution for P N times |
+| `looppp calibrate --target NAME` | GPU box | Grade a published solution (names under `calibration:` in run.yaml) |
+| `looppp cuda-toolkit` | GPU box | Find, or pip-install, nvcc + headers and assemble `CUDA_HOME` |
 | `looppp trace-solution RUN_ID -o f.py` | anywhere | Rebuild a published solution.py from its HF trace |
 | `looppp smoke-llm --model M` | WSL | One small W&B Inference request |
 | `looppp smoke-queue` | anywhere | Queue round trip in a throwaway project |
@@ -154,7 +157,8 @@ src/looppp/
   traces.py         rebuild published solutions from KernelBench HF traces
   tracker.py        W&B agent run / console tracker
   archive.py        best-per-problem archive
-  envcheck.py       GPU box report
+  envcheck.py       GPU box report, GPU probe (nvidia-smi / torch / procfs)
+  cudatk.py         pip-provisioned CUDA toolkit (nvcc + headers) assembled into CUDA_HOME
   cli.py            `looppp` commands
 worker/evaluator.py marimo notebook for molab
 tests/              offline tests (fake deck git repo, fake worker, stub model)
@@ -162,6 +166,10 @@ tests/              offline tests (fake deck git repo, fake worker, stub model)
 
 ## Known limits and things to verify on first real use
 
+- **CUDA toolkit from pip:** only the compiler wheels (`nvcc`, `crt`, `nvvm`) are installed, at the newest
+  release in torch's CUDA major version, with `--no-deps`. torch's pinned runtime libraries are never
+  upgraded. The toolkit step compiles a small test kernel and upgrades the compiler once if an older minor
+  fails against the host glibc (CUDA 13.0 fails on glibc 2.43).
 - **molab behaviour** that isn't documented: whether a busy worker counts as "idle" for the 90-min
   shutdown, whether closing the tab kills the session, whether `nvcc` exists (Triton-only if not). The
   environment table and the heartbeat will show these.

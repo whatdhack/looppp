@@ -127,6 +127,7 @@ def cmd_worker(cfg: Config, args) -> None:
         grader = FakeGrader(wid, delay_seconds=args.fake_delay)
     else:
         _deck(cfg)
+        _cuda_toolkit(cfg, install=args.install_cuda_toolkit)
         w = cfg.worker
         grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                    cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds,
@@ -158,21 +159,44 @@ def cmd_status(cfg: Config, args) -> None:
               f"{r.spec.hypothesis[:70]}")
 
 
+def _cuda_toolkit(cfg: Config, install: bool) -> None:
+    from looppp.cudatk import ensure_cuda_toolkit
+
+    rep = ensure_cuda_toolkit(sys.executable, cfg.path(".looppp"), install=install)
+    if rep.ok:
+        print(f"CUDA toolkit: {rep.cuda_home} (nvcc {rep.nvcc_version}, via {rep.source})")
+    else:
+        print("CUDA toolkit: not available; CUDA C++ (load_inline) solutions will fail to build. "
+              + ("" if install else "Pass --install-cuda-toolkit to install nvcc from pip. ")
+              + " | ".join(rep.log)[-600:])
+
+
+def cmd_cuda_toolkit(cfg: Config, args) -> None:
+    from looppp.cudatk import ensure_cuda_toolkit
+
+    rep = ensure_cuda_toolkit(sys.executable, cfg.path(".looppp"), install=not args.check_only)
+    print(json.dumps(vars(rep), indent=2))
+    if not rep.ok:
+        sys.exit(1)
+
+
 def cmd_calibrate(cfg: Config, args) -> None:
     from looppp.grade import KernelBenchGrader
     from looppp.traces import solution_from_run
     from looppp.worker import calibrate, new_worker_id
 
-    target = cfg.calibration.get(args.problem)
+    target = cfg.calibration.get(args.target)
     if not target:
-        sys.exit(f"no calibration target for {args.problem} in configs/run.yaml")
+        sys.exit(f"no calibration target {args.target!r}; configured: {', '.join(cfg.calibration)}")
     _deck(cfg)
+    _cuda_toolkit(cfg, install=args.install_cuda_toolkit)
     w = cfg.worker
     grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds, w.bench_timeout_seconds,
                                worker_id=new_worker_id("calibrate"))
     code = solution_from_run(target.run_id, cfg.path(".looppp/traces"))
-    print(json.dumps(calibrate(grader, args.problem, code, args.runs, target.published_peak_fraction), indent=2))
+    report = calibrate(grader, target.problem, code, args.runs, target.published_peak_fraction)
+    print(json.dumps({"target": args.target, **report}, indent=2))
 
 
 def cmd_trace_solution(cfg: Config, args) -> None:
@@ -284,6 +308,7 @@ def main(argv: list[str] | None = None) -> None:
     w.add_argument("--poll-seconds", type=float)
     w.add_argument("--max-candidates", type=int)
     w.add_argument("--idle-exit", type=float, help="exit after this many idle seconds")
+    w.add_argument("--install-cuda-toolkit", action="store_true", help="pip-install nvcc if no CUDA toolkit is found")
 
     s = sub.add_parser("status", help="worker heartbeat + recent candidates")
     s.add_argument("--backend", choices=["wandb", "local"])
@@ -291,8 +316,12 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--limit", type=int, default=30)
 
     cal = sub.add_parser("calibrate", help="grade a published KernelBench solution on this GPU")
-    cal.add_argument("--problem", default="07_w4a16_gemm")
+    cal.add_argument("--target", default="w4a16-triton-deepseek-v4-pro", help="name under calibration: in run.yaml")
     cal.add_argument("--runs", type=int, default=3)
+    cal.add_argument("--install-cuda-toolkit", action="store_true")
+
+    ct = sub.add_parser("cuda-toolkit", help="find or pip-install nvcc + headers and assemble CUDA_HOME")
+    ct.add_argument("--check-only", action="store_true")
 
     t = sub.add_parser("trace-solution", help="rebuild solution.py from a KernelBench HF trace")
     t.add_argument("run_id")
@@ -314,7 +343,7 @@ def main(argv: list[str] | None = None) -> None:
     handler = {
         "fetch-deck": cmd_fetch_deck, "run": cmd_run, "worker": cmd_worker, "status": cmd_status,
         "calibrate": cmd_calibrate, "trace-solution": cmd_trace_solution, "smoke-llm": cmd_smoke_llm,
-        "smoke-queue": cmd_smoke_queue, "env": cmd_env,
+        "smoke-queue": cmd_smoke_queue, "env": cmd_env, "cuda-toolkit": cmd_cuda_toolkit,
     }[args.command]
     try:
         handler(cfg, args)
