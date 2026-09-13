@@ -80,7 +80,7 @@ def _(collections, repo_root):
     from looppp.grade import GpuCheckError, KernelBenchGrader
     from looppp.problems import fetch_deck, list_problems
     from looppp.queue.wandb_queue import WandbQueue, explain_wandb_error
-    from looppp.traces import needs_cuda_toolkit, solution_from_run
+    from looppp.traces import calibration_solution, needs_cuda_toolkit
     from looppp.worker import Worker, calibrate, new_worker_id
 
     cfg = load_config(repo_root)
@@ -91,6 +91,7 @@ def _(collections, repo_root):
         WandbQueue,
         Worker,
         calibrate,
+        calibration_solution,
         cfg,
         ensure_cuda_toolkit,
         env_report,
@@ -102,7 +103,6 @@ def _(collections, repo_root):
         missing_required,
         needs_cuda_toolkit,
         new_worker_id,
-        solution_from_run,
     )
 
 
@@ -307,8 +307,8 @@ def _(cfg, deck_problems, mo):
 
 
 @app.cell
-def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, needs_cuda_toolkit, queue,
-      solution_from_run, worker_id):
+def _(calib_form, calibrate, calibration_solution, cfg, explain_wandb_error, grader, holder, mo,
+      needs_cuda_toolkit, queue, worker_id):
     mo.stop(calib_form.value is None)
     mo.stop(grader is None or queue is None, mo.callout(mo.md("**Not connected.** Complete section 3 (Connect) first; its report shows what is missing."), kind="warn"))
     mo.stop(holder["worker"] is not None and holder["worker"].is_running,
@@ -316,12 +316,15 @@ def _(calib_form, calibrate, cfg, explain_wandb_error, grader, holder, mo, needs
     _name = calib_form.value["target"]
     _t = cfg.calibration[_name]
     _p = _t.problem
-    _code = solution_from_run(_t.run_id, cfg.path(".looppp/traces"))
+    try:
+        _code, _source = calibration_solution(_t.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))
+    except Exception as _e:
+        mo.stop(True, mo.callout(mo.md(f"Cannot use `{_name}` for calibration: {_e}"), kind="danger"))
     mo.stop(needs_cuda_toolkit(_code) and not grader.cuda_home(),
             mo.callout(mo.md(f"`{_name}` builds a C++/CUDA extension and this worker has no CUDA toolkit. "
                              "Fix section 2b first, or pick a Triton target."), kind="warn"))
     with mo.status.spinner(title=f"Calibrating {_name}: {calib_form.value['runs']} gradings..."):
-        calib_report = {"target": _name, **calibrate(grader, _p, _code, calib_form.value["runs"],
+        calib_report = {"target": _name, "solution_source": _source, **calibrate(grader, _p, _code, calib_form.value["runs"],
                                                       _t.published_peak_fraction)}
     try:
         queue.worker_log(worker_id, {f"calibration/{_name}": calib_report})

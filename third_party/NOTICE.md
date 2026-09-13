@@ -12,6 +12,6 @@ affiliated with looppp.
 
 ## KernelBench-Hard agent traces (calibration only)
 
-`looppp calibrate` / `trace-solution` download published traces from
-https://huggingface.co/datasets/Infatoshi/kernelbench-hard-traces (MIT) and replay the agent's
-Write/Edit calls to rebuild a published `solution.py`. Nothing from the dataset is committed here.
+`looppp calibrate` / `trace-solution` download the published graded kernels from the KernelBench repo
+(`public/runs/<run_id>_solution.py.txt`, MIT) and, only as a fallback, replay agent traces from
+https://huggingface.co/datasets/Infatoshi/kernelbench-hard-traces (MIT). Nothing from either is committed here.

@@ -61,3 +61,28 @@ def test_needs_cuda_toolkit_detection():
     assert needs_cuda_toolkit("from torch.utils.cpp_extension import load\nmod = load(name='x', sources=[])")
     assert needs_cuda_toolkit("from torch.utils.cpp_extension import load_inline")
     assert not needs_cuda_toolkit("import triton\nimport triton.language as tl\n@triton.jit\ndef k(): pass")
+
+
+def test_published_solution_helpers(tmp_path, monkeypatch):
+    from looppp import traces
+    assert traces.github_slug("https://github.com/Infatoshi/kernelbench.com.git") == "Infatoshi/kernelbench.com"
+    assert traces.published_solution_url("https://github.com/a/b.git", "abc", "RID").endswith(
+        "/a/b/abc/public/runs/RID_solution.py.txt")
+    with pytest.raises(traces.NotSelfContainedError):
+        traces.check_self_contained("x = 1\n\n# ===== sidecar: kern.cu (10 bytes, loaded by solution.py) =====\n")
+
+    cache = tmp_path / "published"
+    cache.mkdir()
+    (cache / "GOOD.py").write_text("class Model: pass\n")
+    assert traces.calibration_solution("GOOD", "https://github.com/a/b", "c", tmp_path) == ("class Model: pass\n", "published")
+
+    (cache / "LOADER.py").write_text("x\n# ===== sidecar: k.cu (1 bytes) =====\n")
+    with pytest.raises(traces.NotSelfContainedError):
+        traces.calibration_solution("LOADER", "https://github.com/a/b", "c", tmp_path)
+
+    def no_published(*a, **k):
+        raise traces.TraceReplayError("404")
+    monkeypatch.setattr(traces, "published_solution", no_published)
+    monkeypatch.setattr(traces, "solution_from_run", lambda rid, cache_dir: "replayed\n")
+    code, source = traces.calibration_solution("MISSING", "https://github.com/a/b", "c", tmp_path)
+    assert code == "replayed\n" and source.startswith("trace-replay")

@@ -82,7 +82,7 @@ resumes when a worker is back. After `queue.max_worker_down_hours` it stops with
 | `looppp fetch-deck` | anywhere | Pinned KernelBench deck |
 | `looppp calibrate --target NAME` | GPU box | Grade a published solution (names under `calibration:` in run.yaml) |
 | `looppp cuda-toolkit` | GPU box | Find, or pip-install, nvcc + headers and assemble `CUDA_HOME` |
-| `looppp trace-solution RUN_ID -o f.py` | anywhere | Rebuild a published solution.py from its HF trace |
+| `looppp trace-solution RUN_ID -o f.py` | anywhere | Published graded solution.py of a run (`--replay` rebuilds it from the HF trace) |
 | `looppp smoke-llm --model M` | WSL | One small W&B Inference request |
 | `looppp smoke-queue` | anywhere | Queue round trip in a throwaway project |
 | `looppp env` | GPU box | Environment report (same table as the notebook) |
@@ -175,8 +175,10 @@ tests/              offline tests (fake deck git repo, fake worker, stub model)
   environment table and the heartbeat will show these.
 - **One worker per W&B project.** Claiming is read-then-write, not atomic.
 - **W&B search lag:** a freshly submitted candidate can take a few seconds to show up in queries.
-- **Calibration** replays the *last* version of the published agent's file, which is usually but not
-  always the graded one.
+- **Calibration** grades the kernel KernelBench published for that run
+  (`public/runs/<run_id>_solution.py.txt` at the pinned deck commit), i.e. the file that produced the
+  published score. Replaying the HF trace is only a fallback: it misses edits made through Bash and can
+  land on an abandoned later version (it did for 3 of the 4 default targets).
 - **`--root` / repo URL:** the notebook clones `https://github.com/whatdhack/looppp.git` when opened
   outside a checkout. Edit `LOOPPP_REPO` in `worker/evaluator.py` if the repo lives elsewhere.
 

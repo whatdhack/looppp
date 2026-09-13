@@ -182,7 +182,7 @@ def cmd_cuda_toolkit(cfg: Config, args) -> None:
 
 def cmd_calibrate(cfg: Config, args) -> None:
     from looppp.grade import KernelBenchGrader
-    from looppp.traces import solution_from_run
+    from looppp.traces import calibration_solution
     from looppp.worker import calibrate, new_worker_id
 
     target = cfg.calibration.get(args.target)
@@ -194,15 +194,19 @@ def cmd_calibrate(cfg: Config, args) -> None:
     grader = KernelBenchGrader(cfg.path(cfg.deck.local_path), cfg.deck.subdir, cfg.deck.problems_dir,
                                cfg.deck.commit, w.expected_gpu, w.check_timeout_seconds, w.bench_timeout_seconds,
                                worker_id=new_worker_id("calibrate"), toolkit_root=cfg.path(".looppp"))
-    code = solution_from_run(target.run_id, cfg.path(".looppp/traces"))
+    code, source = calibration_solution(target.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))
     report = calibrate(grader, target.problem, code, args.runs, target.published_peak_fraction)
-    print(json.dumps({"target": args.target, **report}, indent=2))
+    print(json.dumps({"target": args.target, "solution_source": source, **report}, indent=2))
 
 
 def cmd_trace_solution(cfg: Config, args) -> None:
-    from looppp.traces import solution_from_run
+    from looppp.traces import calibration_solution, solution_from_run
 
-    code = solution_from_run(args.run_id, cfg.path(".looppp/traces"))
+    if args.replay:
+        code = solution_from_run(args.run_id, cfg.path(".looppp/traces"))
+    else:
+        code, source = calibration_solution(args.run_id, cfg.deck.repo, cfg.deck.commit, cfg.path(".looppp/traces"))
+        print(f"# source: {source}", file=sys.stderr)
     if args.output:
         Path(args.output).write_text(code)
         print(f"wrote {len(code)} chars to {args.output}")
@@ -323,8 +327,9 @@ def main(argv: list[str] | None = None) -> None:
     ct = sub.add_parser("cuda-toolkit", help="find or pip-install nvcc + headers and assemble CUDA_HOME")
     ct.add_argument("--check-only", action="store_true")
 
-    t = sub.add_parser("trace-solution", help="rebuild solution.py from a KernelBench HF trace")
+    t = sub.add_parser("trace-solution", help="published graded solution.py of a KernelBench run (or --replay the trace)")
     t.add_argument("run_id")
+    t.add_argument("--replay", action="store_true", help="rebuild from the HF trace instead of the published file")
     t.add_argument("-o", "--output")
 
     sl = sub.add_parser("smoke-llm", help="one tiny request to check a W&B Inference model")

@@ -95,3 +95,58 @@ def solution_from_run(run_id: str, cache_dir: Path) -> str:
     path = download_trace(run_id, cache_dir)
     with path.open() as f:
         return replay_solution(f)
+
+
+# --- published graded kernels ---------------------------------------------------------------
+# KernelBench publishes the graded solution of every board cell at public/runs/<run_id>_solution.py.txt.
+# That is the file that produced the published score; a trace replay is only a best-effort fallback
+# (it misses edits made through Bash and can land on an abandoned later version).
+_SIDECAR_MARKERS = ("# ===== sidecar:", "WARNING: solution loads sidecar")
+
+
+class NotSelfContainedError(TraceReplayError):
+    """The published solution loads extra files (appended as banners), so it cannot be graded alone."""
+
+
+def github_slug(repo_url: str) -> str:
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", repo_url)
+    if not m:
+        raise ValueError(f"not a GitHub repo URL: {repo_url}")
+    return m.group(1)
+
+
+def published_solution_url(repo_url: str, commit: str, run_id: str) -> str:
+    return (f"https://raw.githubusercontent.com/{github_slug(repo_url)}/{commit}"
+            f"/public/runs/{run_id}_solution.py.txt")
+
+
+def check_self_contained(code: str) -> None:
+    if any(marker in code for marker in _SIDECAR_MARKERS):
+        raise NotSelfContainedError("published solution loads sidecar files (kernel sources appended as banners)")
+
+
+def published_solution(run_id: str, repo_url: str, commit: str, cache_dir: Path, timeout: float = 60.0) -> str:
+    cache = Path(cache_dir) / "published" / f"{run_id}.py"
+    if cache.exists() and cache.stat().st_size > 0:
+        code = cache.read_text()
+    else:
+        url = published_solution_url(repo_url, commit, run_id)
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                code = r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            raise TraceReplayError(f"no published solution at {url} ({e.code})") from e
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(code)
+    check_self_contained(code)
+    return code
+
+
+def calibration_solution(run_id: str, repo_url: str, commit: str, cache_dir: Path) -> tuple[str, str]:
+    """(code, source): the published graded kernel, else a trace replay (clearly labelled)."""
+    try:
+        return published_solution(run_id, repo_url, commit, cache_dir), "published"
+    except NotSelfContainedError:
+        raise
+    except (TraceReplayError, OSError, ValueError):
+        return solution_from_run(run_id, cache_dir), "trace-replay (may differ from the graded version)"
