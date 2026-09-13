@@ -40,7 +40,7 @@ Both modes use the same agent, grader, prompts and safety checks.
 
 **You need:** a molab account and a W&B API key. A W&B team entity is optional (usage attribution, logging).
 
-<img src="docs/images/loop-tour.gif" alt="Tour: attach the GPU, settings and model test, live progress, best kernel, W&B system metrics" width="760">
+<img src="docs/images/loop-tour.gif" alt="Tour: attach the GPU, settings and model test, live progress, best kernel, W&B system metrics, ARIA" width="760">
 
 <sub>Regenerate after replacing screenshots: `uv run --with pillow python docs/make_tour_gif.py`</sub>
 
@@ -328,6 +328,23 @@ They are W&B Models metrics, not Weave.
 These worker sessions were mostly idle (utilisation near 0%, apart from calibration at the start). The flat
 600 W enforced power limit is the full RTX PRO 6000 limit, so a power cap does not explain the 0.86
 calibration ratio.
+
+</details>
+
+### ARIA
+
+[ARIA](https://docs.wandb.ai/aria/overview) (W&B's research agent, *Ask ARIA* in a team project) can read the
+W&B runs looppp creates and answer questions about them. In the single notebook this needs **log generations to
+a W&B run** ticked.
+
+<details><summary>Asking ARIA about a running single-notebook loop</summary>
+
+<img src="docs/images/loop-aria-run-analysis.png" alt="W&B run page of a looppp agent run with the ARIA panel explaining that the run is slow but not stuck" width="760">
+
+ARIA only knows what is logged. The agent run records metrics when a generation finishes, so while the first
+generation is still in progress it sees just the starting kernel (`generation=-1`). Here it assumed a remote
+evaluator; in the single notebook the grader runs on the same GPU, which is idle while the model writes
+candidates.
 
 </details>
 

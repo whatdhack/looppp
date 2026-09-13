@@ -21,6 +21,9 @@ SLIDES = [
     (["loop-best-kernel.png"], "4  Best kernel, ready to download"),
     (["loop-wandb-gpu-metrics.png"], "5  W&B system metrics: GPU"),
     (["loop-wandb-system-metrics.png"], "6  W&B system metrics: network, disk, memory"),
+    (["loop-aria-run-analysis.png"], "7  Ask ARIA about a running loop"),
+    ([("loop-aria-run-analysis.png", (1290, 0, 1693, 405)), ("loop-aria-run-analysis.png", (1290, 405, 1693, 590))],
+     "8  ARIA's reading of the run", "row"),
 ]
 
 def _font(name: str, size: int):
@@ -34,31 +37,47 @@ bold = _font("DejaVuSans-Bold.ttf", 24)
 small = _font("DejaVuSans.ttf", 15)
 
 
-def slide(paths: list[str], caption: str, n: int) -> Image.Image:
+def _open(item) -> Image.Image:
+    """item: file name, or (file name, crop box)."""
+    name, box = (item, None) if isinstance(item, str) else item
+    im = Image.open(IMG / name).convert("RGB")
+    return im.crop(box) if box else im
+
+
+def slide(paths: list, caption: str, n: int, layout: str = "column") -> Image.Image:
     canvas = Image.new("RGB", (W, H), (255, 255, 255))
     d = ImageDraw.Draw(canvas)
     d.rectangle([0, 0, W, CAPTION_H], fill=(33, 37, 41))
     d.text((PAD, CAPTION_H // 2), caption, font=bold, fill=(255, 255, 255), anchor="lm")
     d.text((W - PAD, CAPTION_H // 2), f"looppp · {n}/{len(SLIDES)}", font=small, fill=(173, 181, 189), anchor="rm")
 
-    shots = [Image.open(IMG / p).convert("RGB") for p in paths]
+    shots = [_open(p) for p in paths]
     gap = 14
     box_w, box_h = W - 2 * PAD, H - CAPTION_H - 2 * PAD
-    stack_w = max(im.width for im in shots)
-    stack_h = sum(im.height for im in shots) + gap * (len(shots) - 1)
-    scale = min(box_w / stack_w, (box_h - gap * (len(shots) - 1)) / (stack_h - gap * (len(shots) - 1)), 1.0)
+    extra = gap * (len(shots) - 1)
+    if layout == "row":
+        scale = min((box_w - extra) / sum(im.width for im in shots), box_h / max(im.height for im in shots), 1.0)
+    else:
+        scale = min(box_w / max(im.width for im in shots), (box_h - extra) / sum(im.height for im in shots), 1.0)
     shots = [im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS) for im in shots]
-    total_h = sum(im.height for im in shots) + gap * (len(shots) - 1)
-    y = CAPTION_H + PAD + (box_h - total_h) // 2
-    for im in shots:
-        x = (W - im.width) // 2
-        d.rectangle([x - 2, y - 2, x + im.width + 1, y + im.height + 1], outline=(206, 212, 218), width=2)
-        canvas.paste(im, (x, y))
-        y += im.height + gap
+    if layout == "row":
+        x = (W - (sum(im.width for im in shots) + extra)) // 2
+        top = CAPTION_H + PAD + (box_h - max(im.height for im in shots)) // 2
+        for im in shots:
+            d.rectangle([x - 2, top - 2, x + im.width + 1, top + im.height + 1], outline=(206, 212, 218), width=2)
+            canvas.paste(im, (x, top))
+            x += im.width + gap
+    else:
+        y = CAPTION_H + PAD + (box_h - (sum(im.height for im in shots) + extra)) // 2
+        for im in shots:
+            x = (W - im.width) // 2
+            d.rectangle([x - 2, y - 2, x + im.width + 1, y + im.height + 1], outline=(206, 212, 218), width=2)
+            canvas.paste(im, (x, y))
+            y += im.height + gap
     return canvas
 
 
-slides = [slide(p, c, i + 1) for i, (p, c) in enumerate(SLIDES)]
+slides = [slide(spec[0], spec[1], i + 1, *spec[2:]) for i, spec in enumerate(SLIDES)]
 
 frames, durations = [], []
 for i, s in enumerate(slides):
