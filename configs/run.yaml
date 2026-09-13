@@ -10,6 +10,9 @@ loop:
   target_peak_fraction: null   # stop early once reached (e.g. 0.40)
   history_window: 12           # graded attempts shown to the model each generation
   precheck_repairs: 1          # local re-asks when a candidate fails precheck
+  parents_top_k: 2             # candidates rotate over the k best distinct kernels
+  explore_after: 2             # generations without a >= min_rel_improvement gain before explore mode (0 = off)
+  min_rel_improvement: 0.05    # 5%: smaller gains count as parameter tweaking
   state_dir: .looppp/loops
 
 queue:

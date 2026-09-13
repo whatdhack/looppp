@@ -21,8 +21,17 @@ traces.
 2. Sections 1-2 check the environment, fetch the deck and install the CUDA toolkit automatically.
 3. Section 3: paste the W&B API key, pick model and problem, press **Apply settings** (checks the GPU and
    builds the grader). **Test the model** sends one small request.
-4. Section 4: **Start loop**. Section 5 shows best-so-far, the attempts table, the log, and the best kernel
-   with a download button. **Stop loop** finishes the current step.
+4. Section 4: **Start loop**. Section 5 shows best-so-far, pace (minutes per generation, how many more fit in
+   the budget), the attempts table (mode, score, model/grading seconds), the log, and the best kernel with a
+   download button. **Stop loop** finishes the current step.
+
+Search behaviour (both modes, `configs/run.yaml` → `loop:`):
+- **Parents:** candidates rotate over the `parents_top_k` best distinct kernels, not only the single best.
+- **Explore:** after `explore_after` generations without a `min_rel_improvement` (5%) gain, one candidate per
+  generation keeps refining the best kernel and the others must try a structurally different design. The prompt
+  lists every approach already tried. Keep `patience` above `explore_after`.
+- **Start from a published kernel** (notebook setting): grades a KernelBench-published kernel first and uses it
+  as the starting parent. It is never archived, since the result is no longer the model alone.
 
 The rest of this README describes the distributed mode and the shared components.
 

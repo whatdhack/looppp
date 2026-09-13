@@ -29,6 +29,9 @@ class LoopSettings:
     target_peak_fraction: float | None = None
     history_window: int = 12
     precheck_repairs: int = 1
+    parents_top_k: int = 2               # candidates rotate over the k best distinct kernels
+    explore_after: int = 2               # generations without a min_rel_improvement gain -> explore (0 = never)
+    min_rel_improvement: float = 0.05
     state_dir: str = ".looppp/loops"
 
 

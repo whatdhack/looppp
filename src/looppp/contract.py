@@ -77,6 +77,7 @@ class CandidateSpec:
     hypothesis: str
     code_sha256: str
     parent: str | None = None
+    mode: str = "exploit"                # exploit | explore | seed
     schema_version: int = SCHEMA_VERSION
 
     def to_config(self) -> dict[str, Any]:

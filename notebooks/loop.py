@@ -84,6 +84,7 @@ def _(repo_root):
     from looppp.queue.wandb_queue import explain_wandb_error
     from looppp.session import LoopSession, SessionOptions, sparkline_svg
     from looppp.tracker import ConsoleTracker, TeeTracker, WandbTracker
+    from looppp.traces import calibration_solution, needs_cuda_toolkit
 
     cfg = load_config(repo_root)
     holder = {"session": None}  # survives re-runs of the cells below
@@ -97,6 +98,7 @@ def _(repo_root):
         TeeTracker,
         WandbInferenceLLM,
         WandbTracker,
+        calibration_solution,
         cfg,
         ensure_cuda_toolkit,
         env_report,
@@ -106,6 +108,7 @@ def _(repo_root):
         list_problems,
         load_problem,
         missing_required,
+        needs_cuda_toolkit,
         parse_llm_response,
         sanitize_id,
         sparkline_svg,
@@ -175,6 +178,15 @@ def _(cfg, deck_problems, mo):
         "patience": mo.ui.number(1, 100, value=cfg.loop.patience, label="stop after N generations without a new best"),
         "wall_hours": mo.ui.number(0.1, 11.5, step=0.1, value=11.0, label="wall-clock budget (h; molab stops at 12)"),
         "target": mo.ui.number(0, 1, step=0.01, value=0, label="stop at peak_fraction (0 = off)"),
+        "parents_top_k": mo.ui.slider(1, 4, value=cfg.loop.parents_top_k, show_value=True,
+                                      label="parents: candidates rotate over the k best kernels"),
+        "explore_after": mo.ui.number(0, 20, value=cfg.loop.explore_after,
+                                      label="explore after N generations without a >=5% gain (0 = never)"),
+        "start_from": mo.ui.dropdown(
+            {"reference.py (the model alone)": "",
+             **{f"published kernel: {n} ({t.problem}, {t.published_peak_fraction:.3f} on KernelBench)": n
+                for n, t in cfg.calibration.items()}},
+            value="reference.py (the model alone)", label="start from"),
         "resume_loop_id": mo.ui.text(value="", label="resume loop id (optional)"),
         "expected_gpu": mo.ui.text(value=cfg.worker.expected_gpu or "", label="expected GPU (substring)"),
         "log_to_wandb": mo.ui.checkbox(value=False, label="also log generations to a W&B run (needs a Models seat)"),
@@ -182,13 +194,17 @@ def _(cfg, deck_problems, mo):
         "entity": mo.ui.text(value=cfg.queue.entity or "", label="W&B entity (for logging / usage attribution)"),
         "project": mo.ui.text(value=cfg.queue.project, label="W&B project"),
     }).form(submit_button_label="Apply settings")
-    mo.vstack([mo.md("## 3. Settings\nApplying settings checks the GPU and builds the grader. Nothing runs yet."),
+    mo.vstack([mo.md("## 3. Settings\nApplying settings checks the GPU and builds the grader. Nothing runs yet.  \n"
+                     "*Start from a published kernel* grades that kernel first and lets the model improve it: "
+                     "faster to a good kernel, but the result is no longer the model alone. Keep patience above "
+                     "the explore threshold, or the loop stops before exploring."),
                settings_form])
     return (settings_form,)
 
 
 @app.cell
-def _(GpuCheckError, KernelBenchGrader, WandbInferenceLLM, cfg, load_problem, mo, settings_form):
+def _(GpuCheckError, KernelBenchGrader, WandbInferenceLLM, calibration_solution, cfg, load_problem, mo,
+      needs_cuda_toolkit, settings_form):
     # Never mo.stop here: export `ready = None` with a reason so later cells can say what is missing.
     def _prepare(v):
         out = []
@@ -217,7 +233,28 @@ def _(GpuCheckError, KernelBenchGrader, WandbInferenceLLM, cfg, load_problem, mo
         out.append(mo.callout(mo.md(f"**GPU:** `{grader.gpu}` · torch `{grader.torch}` · CUDA toolkit: "
                                     f"{'`' + home + '`' if home else 'none (C++/CUDA kernels will fail)'}"),
                               kind="success" if home else "warn"))
-        return {"settings": v, "model": model, "problem": problem, "llm": llm, "grader": grader}, out
+        seed = None
+        if v["start_from"]:
+            target = cfg.calibration[v["start_from"]]
+            if target.problem != problem.name:
+                return None, out + [mo.callout(mo.md(f"**Start from:** `{v['start_from']}` is a kernel for "
+                                                     f"`{target.problem}`, not `{problem.name}`."), kind="danger")]
+            try:
+                code, source = calibration_solution(target.run_id, cfg.deck.repo, cfg.deck.commit,
+                                                    cfg.path(".looppp/traces"))
+            except Exception as e:
+                return None, out + [mo.callout(mo.md(f"**Start from:** cannot load `{v['start_from']}`: {e}"),
+                                               kind="danger")]
+            if needs_cuda_toolkit(code) and not home:
+                return None, out + [mo.callout(mo.md("**Start from:** that kernel builds a C++/CUDA extension and "
+                                                     "there is no CUDA toolkit (section 2)."), kind="danger")]
+            seed = (code, f"{v['start_from']} ({source})")
+            out.append(mo.callout(mo.md(f"**Start from:** `{v['start_from']}`, graded first on this GPU "
+                                        f"({len(code)} chars, {source})."), kind="info"))
+        if v["explore_after"] and int(v["patience"]) <= int(v["explore_after"]):
+            out.append(mo.callout(mo.md(f"**Note:** patience {int(v['patience'])} ≤ explore threshold "
+                                        f"{int(v['explore_after'])}: the loop may stop before it explores."), kind="warn"))
+        return {"settings": v, "model": model, "problem": problem, "llm": llm, "grader": grader, "seed": seed}, out
 
     if settings_form.value is None:
         ready, _report = None, [mo.md("Fill in the settings and press **Apply settings**.")]
@@ -311,9 +348,10 @@ def _(ConsoleTracker, LoopSession, SessionOptions, TeeTracker, WandbInferenceLLM
     _target = float(_v["target"] or 0)
     _options = SessionOptions(candidates_per_generation=int(_v["candidates"]), max_generations=int(_v["generations"]),
                               patience=int(_v["patience"]), wall_budget_hours=float(_v["wall_hours"]),
-                              target_peak_fraction=_target if _target > 0 else None, poll_seconds=5.0)
+                              target_peak_fraction=_target if _target > 0 else None, poll_seconds=5.0,
+                              parents_top_k=int(_v["parents_top_k"]), explore_after=int(_v["explore_after"] or 0))
     holder["session"] = LoopSession(cfg, ready["problem"], _llm, ready["grader"], _loop_id, cfg.deck.commit,
-                                    _options, tracker=_tracker, state_root=_root)
+                                    _options, tracker=_tracker, state_root=_root, seed=ready["seed"])
     holder["session"].start()
     mo.callout(mo.md(f"Started loop `{_loop_id}`. " + " ".join(_notes)), kind="success")
     return
@@ -361,7 +399,12 @@ def _(holder, mo, refresh, sparkline_svg):
             mo.stat(_snap["generation"] + 1, label="generation"),
             mo.stat(f"{_snap['graded']} / {_snap['attempts']}", label="graded / attempts"),
             mo.stat(str(_w.get("state", "-")), label="grader", caption=(_w.get("current") or "")[-24:]),
+            mo.stat(f"{_snap['min_per_generation']} min" if _snap["min_per_generation"] else "-", label="per generation",
+                    caption=(f"~{_snap['generations_left_in_budget']} more fit in budget"
+                             if _snap["generations_left_in_budget"] is not None else "")),
         ], widths="equal"),
+        mo.md(f"model ≈ {_snap['avg_model_s'] or '-'} s / candidate · grading ≈ {_snap['avg_grade_s'] or '-'} s / "
+              f"candidate · explore candidates: {_snap['explore_attempts']}"),
         mo.Html(sparkline_svg(_snap["best_so_far"])),
     ]
     if _snap["alerts"]:

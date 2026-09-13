@@ -54,18 +54,23 @@ class SessionOptions:
     wall_budget_hours: float = 11.0          # molab stops sessions at 12 h
     target_peak_fraction: float | None = None
     poll_seconds: float = 5.0
+    parents_top_k: int = 2
+    explore_after: int = 2                   # generations without a >= min_rel_improvement gain -> explore
+    min_rel_improvement: float = 0.05
 
 
 class LoopSession:
     def __init__(self, cfg: Config, problem: Problem, llm: LLM, grader: Grader, loop_id: str, deck_commit: str,
                  options: SessionOptions, *, tracker: Tracker | None = None, archive: Archive | None = None,
-                 state_root: Path | None = None, log_lines: int = 400):
+                 state_root: Path | None = None, log_lines: int = 400, seed: tuple[str, str] | None = None):
         self.cfg = copy.deepcopy(cfg)
         ls, qs = self.cfg.loop, self.cfg.queue
         ls.problem, ls.model = problem.name, llm.model
         ls.candidates_per_generation = options.candidates_per_generation
         ls.max_generations, ls.patience = options.max_generations, options.patience
         ls.wall_budget_hours, ls.target_peak_fraction = options.wall_budget_hours, options.target_peak_fraction
+        ls.parents_top_k, ls.explore_after = options.parents_top_k, options.explore_after
+        ls.min_rel_improvement = options.min_rel_improvement
         qs.poll_seconds = options.poll_seconds
         qs.heartbeat_stale_seconds = max(60.0, 10 * options.poll_seconds)
         qs.max_worker_down_hours = 0.05  # the grader thread lives in this process: silence means it died
@@ -82,7 +87,7 @@ class LoopSession:
                              heartbeat_seconds=min(options.poll_seconds, 10.0),
                              max_attempts=self.cfg.queue.max_attempts, log=lambda s: self._log(f"[grader] {s}"))
         self.loop = AgentLoop(self.cfg, problem, self.queue, llm, self.tracker, self.archive, loop_id, deck_commit,
-                              sleep=self._sleep, log=lambda s: self._log(f"[agent] {s}"))
+                              sleep=self._sleep, log=lambda s: self._log(f"[agent] {s}"), seed=seed)
         self.state = "created"
         self.error = ""
         self.outcome: LoopOutcome | None = None
@@ -134,6 +139,28 @@ class LoopSession:
         self.loop.request_stop()
         self._stop.set()
 
+    def _timing(self, attempts) -> dict:
+        """Average model / grading seconds and minutes per completed generation, plus how many more
+        generations fit in the wall-clock budget at that pace."""
+        model_s = [a.llm_seconds for a in attempts if a.llm_seconds]
+        grade_s = [a.grade.grade_seconds for a in attempts if a.grade and a.grade.grade_seconds]
+        gen_minutes = []
+        for g in sorted({a.generation for a in attempts if a.generation >= 0}):
+            gen = [a for a in attempts if a.generation == g]
+            if all(a.finished_ts or a.status == "local_failed" for a in gen) and any(a.started_ts for a in gen):
+                start = min(a.started_ts for a in gen if a.started_ts)
+                end = max((a.finished_ts or a.created_ts) for a in gen)
+                gen_minutes.append((end - start) / 60)
+        per_gen = sum(gen_minutes) / len(gen_minutes) if gen_minutes else None
+        left_min = self.cfg.loop.wall_budget_hours * 60 - ((time.time() - self.started_ts) / 60 if self.started_ts else 0)
+        return {
+            "avg_model_s": round(sum(model_s) / len(model_s)) if model_s else None,
+            "avg_grade_s": round(sum(grade_s) / len(grade_s)) if grade_s else None,
+            "min_per_generation": round(per_gen, 1) if per_gen else None,
+            "generations_left_in_budget": int(left_min // per_gen) if per_gen else None,
+            "explore_attempts": sum(1 for a in attempts if a.mode == "explore"),
+        }
+
     def best(self) -> tuple[str, dict] | None:
         own = self.loop._best_attempt()
         if own is None:
@@ -147,9 +174,12 @@ class LoopSession:
         for a in attempts:
             g = a.grade
             rows.append({
-                "gen": f"{a.generation}.{a.index}", "status": a.status,
+                "gen": "seed" if a.generation < 0 else f"{a.generation}.{a.index}", "mode": a.mode, "status": a.status,
                 "peak_fraction": g.peak_fraction if g and g.scored else None,
                 "fail_stage": (g.fail_stage or "") if g else "",
+                "model_s": a.llm_seconds or None,
+                "grade_s": g.grade_seconds if g and g.grade_seconds else None,
+                "total_min": round((a.finished_ts - a.started_ts) / 60, 1) if a.finished_ts and a.started_ts else None,
                 "hypothesis": a.hypothesis[:120],
                 "reason": (g.fail_reason[:160] if g and not g.scored else ""),
             })
@@ -174,6 +204,7 @@ class LoopSession:
             "alerts": list(getattr(self.tracker, "alerts", [])),
             "logs": list(self.logs),
             "stop_reason": self.outcome.stop_reason if self.outcome else "",
+            **self._timing(attempts),
             "activity": self.loop.activity if self.is_running else "",
             "activity_seconds": round(time.time() - self.loop.activity_since) if self.is_running else 0,
         }

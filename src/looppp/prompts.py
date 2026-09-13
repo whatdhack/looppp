@@ -59,10 +59,17 @@ def history_table(items: list[HistoryItem]) -> str:
     return "\n".join(lines)
 
 
+MODE_EXPLOIT = "exploit"
+MODE_EXPLORE = "explore"
+MODE_SEED = "seed"
+
+
 def build_propose_messages(problem: Problem, *, parent_code: str, parent_label: str,
                            parent_result: GradeResult | None, history: list[HistoryItem],
                            failures: list[tuple[HistoryItem, str]], sibling_hypotheses: list[str],
-                           index: int, n: int, best_peak: float | None) -> list[dict]:
+                           index: int, n: int, best_peak: float | None, mode: str = MODE_EXPLOIT,
+                           tried: list[str] | None = None, stagnant_generations: int = 0,
+                           min_rel_improvement: float = 0.05) -> list[dict]:
     forbidden = "\n".join(f"- {op}" for op in problem.forbidden) or "- (none listed)"
     parts = [
         "## Task (as given to engineers on this problem)\n" + problem.prompt.strip(),
@@ -77,8 +84,21 @@ def build_propose_messages(problem: Problem, *, parent_code: str, parent_label: 
     ]
     for item, log in failures:
         parts.append(f"## Evaluator log for failed attempt gen {item.generation}.{item.index}\n```\n{log.strip()}\n```")
-    ask = (f"## Your job\nWrite candidate {index + 1} of {n} for this generation. Start from the parent, "
-           "fix any failure first, then make ONE focused improvement.")
+    if mode == MODE_EXPLORE:
+        ask = (f"## Your job: EXPLORE (candidate {index + 1} of {n})\n"
+               f"The best score has not improved by {min_rel_improvement:.0%} for {stagnant_generations} generations, "
+               "so parameter tweaks of the current design are exhausted. Write a STRUCTURALLY DIFFERENT kernel: "
+               "a different algorithm or data layout, a different decomposition per shape regime (decode-sized vs "
+               "large batches), a different precision / accumulation strategy, or a different backend (Triton vs a "
+               "C++/CUDA extension built with torch.utils.cpp_extension.load_inline). Changing only block sizes, "
+               "num_warps, num_stages or autotune lists does NOT count. You may start from reference.py instead "
+               "of the parent. It must still pass check.py. Think about which shape has the lowest per-shape "
+               "fraction and what actually bounds it before choosing.")
+        if tried:
+            ask += "\n\nApproaches already tried in this loop (do not repeat them):\n" + "\n".join(f"- {t}" for t in tried)
+    else:
+        ask = (f"## Your job\nWrite candidate {index + 1} of {n} for this generation. Start from the parent, "
+               "fix any failure first, then make ONE focused improvement.")
     if sibling_hypotheses:
         ask += ("\nOther candidates in this generation already test these ideas; pick a DIFFERENT one:\n"
                 + "\n".join(f"- {h}" for h in sibling_hypotheses))

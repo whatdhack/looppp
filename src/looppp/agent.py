@@ -24,7 +24,8 @@ from looppp.llm import LLM, EmptyCompletionError
 from looppp.parsing import ResponseFormatError, parse_llm_response
 from looppp.precheck import precheck
 from looppp.problems import Problem
-from looppp.prompts import HistoryItem, build_propose_messages, build_repair_messages
+from looppp.prompts import (MODE_EXPLOIT, MODE_EXPLORE, MODE_SEED, HistoryItem, build_propose_messages,
+                             build_repair_messages)
 from looppp.queue.base import Queue
 from looppp.tracker import Tracker
 
@@ -48,6 +49,11 @@ class Attempt:
     result: dict | None = None
     alive_wait_seconds: float = 0.0
     created_ts: float = field(default_factory=time.time)
+    mode: str = MODE_EXPLOIT             # exploit | explore | seed
+    llm_seconds: float = 0.0             # model time for this candidate (all repair rounds)
+    completion_tokens: int = 0
+    started_ts: float | None = None      # before the first model call
+    finished_ts: float | None = None     # when the grade came back
 
     @property
     def grade(self) -> GradeResult | None:
@@ -80,8 +86,9 @@ class AgentLoop:
     def __init__(self, cfg: Config, problem: Problem, queue: Queue, llm: LLM, tracker: Tracker,
                  archive: Archive, loop_id: str, deck_commit: str, *,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, seed: tuple[str, str] | None = None):
         self.cfg, self.ls, self.qs = cfg, cfg.loop, cfg.queue
+        self.seed = seed  # (code, label): a known kernel graded first and used as the starting parent
         self.problem, self.queue, self.llm, self.tracker, self.archive = problem, queue, llm, tracker, archive
         self.loop_id, self.deck_commit = loop_id, deck_commit
         self.clock, self.sleep, self.log = clock, sleep, log
@@ -140,6 +147,41 @@ class AgentLoop:
         if cur and cur[1].get("deck_commit") == self.deck_commit:
             return cur
         return None
+
+    def _top_parents(self, k: int) -> list[tuple[str, str, GradeResult | None, str | None]]:
+        """Up to k distinct graded kernels, best first (the archived best counts if it beats them)."""
+        seen, own = set(), []
+        for a in sorted((a for a in self.attempts if a.peak is not None), key=lambda a: a.peak, reverse=True):
+            if a.code_sha256 not in seen:
+                seen.add(a.code_sha256)
+                own.append(a)
+        parents = [(self._code(a), f"{a.label} ({a.hypothesis})", a.grade, a.candidate_id) for a in own[:k]]
+        archived = self._archived()
+        if archived and (not own or archived[1]["peak_fraction"] > own[0].peak):
+            parents = [self._parent()] + parents[:k - 1]
+        return parents or [self._parent()]
+
+    def _stagnant_generations(self, generation: int) -> int:
+        """Generations before *generation* since the best score last rose by >= min_rel_improvement."""
+        last_significant, best = -1, None
+        for g in sorted({a.generation for a in self.attempts if a.generation < generation}):
+            gen_best = max((a.peak for a in self.attempts if a.generation == g and a.peak is not None), default=None)
+            if gen_best is None:
+                continue
+            if best is None or gen_best >= best * (1 + self.ls.min_rel_improvement):
+                last_significant = g
+            best = gen_best if best is None else max(best, gen_best)
+        return max(0, (generation - 1) - last_significant)
+
+    def _tried_approaches(self, limit: int = 25) -> list[str]:
+        out = []
+        for a in self.attempts:
+            if a.mode == MODE_SEED or not a.code_file:
+                continue
+            g = a.grade
+            outcome = (f"{a.peak:.4f}" if a.peak is not None else (g.fail_stage if g and g.fail_stage else a.status))
+            out.append(f"{a.label} [{outcome}]: {a.hypothesis[:140]}")
+        return out[-limit:]
 
     def _parent(self) -> tuple[str, str, GradeResult | None, str | None]:
         own, archived = self._best_attempt(), self._archived()
@@ -200,31 +242,39 @@ class AgentLoop:
         return out[:2]
 
     def _store_code(self, generation: int, index: int, code: str) -> str:
-        rel = f"code/g{generation:03d}-i{index}.py"
+        rel = f"code/g{generation:03d}-i{index}.py" if generation >= 0 else f"code/seed-i{index}.py"
         (self.dir / rel).write_text(code)
         return rel
 
-    def _propose_one(self, generation: int, index: int, n: int, parent, siblings: list[str]) -> Attempt:
+    def _propose_one(self, generation: int, index: int, n: int, parent, siblings: list[str],
+                     mode: str = MODE_EXPLOIT, tried: list[str] | None = None, stagnant: int = 0) -> Attempt:
         parent_code, parent_label, parent_result, parent_id = parent
         messages = build_propose_messages(
             self.problem, parent_code=parent_code, parent_label=parent_label, parent_result=parent_result,
             history=self._history(), failures=self._failure_logs(generation - 1),
-            sibling_hypotheses=siblings, index=index, n=n, best_peak=self._best_peak(),
+            sibling_hypotheses=siblings, index=index, n=n, best_peak=self._best_peak(), mode=mode,
+            tried=tried, stagnant_generations=stagnant, min_rel_improvement=self.ls.min_rel_improvement,
         )
+        started, llm_seconds, tokens = time.time(), 0.0, 0
+        timing = lambda a: self._stamp(a, mode, started, llm_seconds, tokens)  # noqa: E731
         hypothesis, code, errors = "(no reply)", "", ["no reply"]
         for repair in range(self.ls.precheck_repairs + 1):
             what = "waiting for model" if repair == 0 else f"waiting for model (repair {repair})"
             self._set_activity(f"gen {generation}.{index} (candidate {index + 1}/{n}): {what}")
             self.log(f"gen {generation}.{index}: {what} ({self.llm.model}, prompt ~{sum(len(m['content']) for m in messages) // 4} tokens)")
+            t_call = time.monotonic()
             try:
                 reply = self.llm.complete(messages)
                 self._llm_failures = 0
             except Exception as e:  # noqa: BLE001 - one bad call costs one candidate, not the session
+                llm_seconds += time.monotonic() - t_call
                 self._llm_failures += 1
                 reason = str(e) if isinstance(e, EmptyCompletionError) else f"{type(e).__name__}: {e}"
                 if self._llm_failures >= MAX_CONSECUTIVE_LLM_FAILURES:
                     raise RuntimeError(f"{self._llm_failures} model calls failed in a row; last: {reason}") from e
-                return self._local_failure(generation, index, "(model call failed)", c.STAGE_LLM, reason, "")
+                return timing(self._local_failure(generation, index, "(model call failed)", c.STAGE_LLM, reason, ""))
+            llm_seconds += time.monotonic() - t_call
+            tokens += reply.completion_tokens or 0
             self.tracker.log({"llm/prompt_tokens": reply.prompt_tokens, "llm/completion_tokens": reply.completion_tokens,
                               "llm/attempts": reply.attempts, "generation": generation})
             try:
@@ -238,19 +288,28 @@ class AgentLoop:
                 messages = build_repair_messages(messages, reply.text, errors)
 
         if errors:
-            return self._local_failure(generation, index, hypothesis, c.STAGE_PRECHECK, "; ".join(errors), code)
+            return timing(self._local_failure(generation, index, hypothesis, c.STAGE_PRECHECK, "; ".join(errors), code))
 
         sha = c.sha256_text(code)
         dup = next((a for a in self.attempts if a.code_sha256 == sha and a.candidate_id), None)
         if dup:
-            return self._local_failure(generation, index, hypothesis, c.STAGE_DUPLICATE,
-                                       f"identical to {dup.label}", code)
+            return timing(self._local_failure(generation, index, hypothesis, c.STAGE_DUPLICATE,
+                                              f"identical to {dup.label}", code))
+        return timing(self._submit_attempt(generation, index, hypothesis, code, parent_id, mode, self.llm.model))
 
-        attempt = Attempt(generation, index, hypothesis, c.STATUS_SUBMITTING, self.llm.model, sha,
-                          self._store_code(generation, index, code), parent=parent_id)
+    @staticmethod
+    def _stamp(a: Attempt, mode: str, started: float, llm_seconds: float, tokens: int) -> Attempt:
+        a.mode, a.started_ts, a.llm_seconds, a.completion_tokens = mode, started, round(llm_seconds, 1), tokens
+        return a
+
+    def _submit_attempt(self, generation: int, index: int, hypothesis: str, code: str, parent_id: str | None,
+                        mode: str, model: str) -> Attempt:
+        sha = c.sha256_text(code)
+        attempt = Attempt(generation, index, hypothesis, c.STATUS_SUBMITTING, model, sha,
+                          self._store_code(generation, index, code), parent=parent_id, mode=mode)
         spec = CandidateSpec(problem=self.problem.name, deck_commit=self.deck_commit, loop_id=self.loop_id,
-                             generation=generation, index=index, model=self.llm.model, hypothesis=hypothesis,
-                             code_sha256=sha, parent=parent_id)
+                             generation=generation, index=index, model=model, hypothesis=hypothesis,
+                             code_sha256=sha, parent=parent_id, mode=mode)
         for try_no in range(3):
             try:
                 attempt.candidate_id = self.queue.submit(spec, code)
@@ -292,6 +351,7 @@ class AgentLoop:
                 a.status = rec.status
                 if rec.terminal:
                     a.result = rec.result.to_summary() if rec.result else a.result
+                    a.finished_ts = time.time()
                     g = a.grade
                     self.log(f"{a.label}: {rec.status} correct={g.correct if g else None} "
                              f"peak={g.peak_fraction if g else None} stage={g.fail_stage if g else None}")
@@ -327,7 +387,10 @@ class AgentLoop:
         best = self._best_attempt()
         improved = best is not None and best.generation == generation and \
             (previous_best is None or best.peak > previous_best)
-        if improved:
+        if improved and best.mode == MODE_SEED:
+            self.best_gen = generation
+            self.log(f"seed graded: {best.peak:.4f} (not archived: it is not this loop's work)")
+        elif improved:
             self.best_gen = generation
             meta = {"peak_fraction": best.peak, "shape_fractions": best.grade.shape_fractions,
                     "candidate_id": best.candidate_id, "model": best.model, "hypothesis": best.hypothesis,
@@ -342,6 +405,7 @@ class AgentLoop:
                 stages[g.fail_stage] = stages.get(g.fail_stage, 0) + 1
         self.tracker.log({
             "generation": generation,
+            "gen_explore": sum(1 for a in gen_attempts if a.mode == MODE_EXPLORE),
             "gen_best_peak_fraction": max((a.peak for a in gen_scored), default=None),
             "best_peak_fraction": self._best_peak(),
             "gen_scored": len(gen_scored), "gen_attempts": len(gen_attempts),
@@ -361,6 +425,17 @@ class AgentLoop:
                 self.log(f"resuming: waiting for {len(resumed_open)} candidates from a previous session")
                 self._wait()
                 self._finish_generation(generation - 1, previous_best=None)
+            if self.seed and not any(a.mode == MODE_SEED for a in self.attempts):
+                self._await_worker()
+                seed_code, seed_label = self.seed
+                self._set_activity(f"grading the starting kernel ({seed_label})")
+                self.log(f"seed: grading starting kernel {seed_label}")
+                self.attempts.append(self._submit_attempt(-1, 0, f"starting kernel: {seed_label}", seed_code,
+                                                          None, MODE_SEED, "seed"))
+                self._save()
+                self._wait()
+                self._finish_generation(-1, previous_best=None)
+                generation = max(generation, 0)
             while True:
                 reason = self._stop_reason(generation, started)
                 if reason:
@@ -370,13 +445,23 @@ class AgentLoop:
                 if self._stop_requested:
                     continue  # -> _stop_reason returns "stopped"
                 previous_best = self._best_peak()
-                parent = self._parent()
+                parents = self._top_parents(max(1, self.ls.parents_top_k))
+                stagnant = self._stagnant_generations(generation)
+                explore = self.ls.explore_after > 0 and stagnant >= self.ls.explore_after
+                tried = self._tried_approaches() if explore else None
                 siblings: list[str] = []
                 n = self.ls.candidates_per_generation
+                if explore:
+                    self.log(f"generation {generation}: EXPLORE (no >= {self.ls.min_rel_improvement:.0%} gain for "
+                             f"{stagnant} generations)")
                 for i in range(n):
                     if self._stop_requested:
                         break
-                    attempt = self._propose_one(generation, i, n, parent, siblings)
+                    # explore: keep one exploit candidate on the best kernel (if n > 1), the rest try new designs
+                    mode = MODE_EXPLORE if explore and (i > 0 or n == 1) else MODE_EXPLOIT
+                    parent = parents[0] if explore else parents[i % len(parents)]
+                    attempt = self._propose_one(generation, i, n, parent, siblings, mode=mode, tried=tried,
+                                                stagnant=stagnant)
                     siblings.append(attempt.hypothesis)
                     self.attempts.append(attempt)
                     self._save()
